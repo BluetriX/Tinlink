@@ -1,7 +1,9 @@
 // Release builds run without a console window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod account;
 mod audio;
+mod backend;
 mod screen;
 mod session;
 mod stats;
@@ -22,6 +24,8 @@ use crate::voice::{Voice, VoiceMode};
 const DEFAULT_PTT_KEY: &str = "F8";
 
 struct AppState {
+    /// The logged-in server connection, if any.
+    backend: tokio::sync::Mutex<Option<backend::Backend>>,
     /// The active room connection, if any.
     session: tokio::sync::Mutex<Option<Session>>,
     voice: Voice,
@@ -55,6 +59,8 @@ struct StartupOptions {
     join: bool,
     /// Share the first screen right after joining.
     share: bool,
+    /// Separate saved login, e.g. for a second instance with another account.
+    profile: Option<String>,
 }
 
 impl StartupOptions {
@@ -68,6 +74,13 @@ impl StartupOptions {
                 "--voice-activation" => opts.voice_activation = true,
                 "--join" => opts.join = true,
                 "--share" => opts.share = true,
+                "--profile" => {
+                    opts.profile = args.next().filter(|p| {
+                        !p.is_empty()
+                            && p.chars()
+                                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                    })
+                }
                 other => tracing::warn!("ignoring unknown argument {other}"),
             }
         }
@@ -80,19 +93,17 @@ fn startup_options(opts: State<'_, StartupOptions>) -> StartupOptions {
     opts.inner().clone()
 }
 
-#[tauri::command]
-async fn join(
+/// Joins a LiveKit room with `token`, leaving any current room first.
+async fn connect_voice(
     app: AppHandle,
-    state: State<'_, AppState>,
-    server: String,
-    name: String,
-    room: String,
+    state: &AppState,
+    token: session::TokenResponse,
 ) -> CmdResult<JoinInfo> {
     let mut slot = state.session.lock().await;
     if let Some(old) = slot.take() {
         old.leave(&state.voice).await;
     }
-    let session = Session::join(app, &server, &name, &room, &state.voice, &state.audio_prefs)
+    let session = Session::join(app, token, &state.voice, &state.audio_prefs)
         .await
         .map_err(|e| format!("{e:#}"))?;
     let info = JoinInfo {
@@ -101,6 +112,22 @@ async fn join(
     };
     *slot = Some(session);
     Ok(info)
+}
+
+/// Joins a room with an unauthenticated development token
+/// (`TINLINK_DEV_INSECURE_TOKENS` on the server).
+#[tauri::command]
+async fn dev_join(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    server: String,
+    name: String,
+    room: String,
+) -> CmdResult<JoinInfo> {
+    let token = session::fetch_token(&server, &name, &room)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    connect_voice(app, &state, token).await
 }
 
 #[tauri::command]
@@ -179,6 +206,39 @@ async fn stop_share(state: State<'_, AppState>) -> CmdResult<()> {
     Ok(())
 }
 
+/// Creates the main window from the config. A `--profile` gets its own
+/// WebView data folder (separate settings); debug builds open a DevTools
+/// port when `TINLINK_DEVTOOLS_PORT` is set, for UI automation.
+fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == "main")
+        .cloned()
+        .expect("main window is configured");
+    let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?;
+    if let Some(profile) = &app.state::<StartupOptions>().profile {
+        let dir = app
+            .path()
+            .app_local_data_dir()?
+            .join(format!("webview-{profile}"));
+        builder = builder.data_directory(dir);
+    }
+    if cfg!(debug_assertions)
+        && let Ok(port) = std::env::var("TINLINK_DEVTOOLS_PORT")
+        && port.parse::<u16>().is_ok()
+    {
+        // Keep wry's default flags, which this replaces.
+        builder = builder.additional_browser_args(&format!(
+            "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port={port}"
+        ));
+    }
+    builder.build()?;
+    Ok(())
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -207,12 +267,14 @@ fn main() {
         )
         .manage(StartupOptions::parse(std::env::args().skip(1)))
         .manage(AppState {
+            backend: tokio::sync::Mutex::new(None),
             session: tokio::sync::Mutex::new(None),
             voice: Voice::default(),
             audio_prefs: AudioPrefs::default(),
             ptt_key: Mutex::new(None),
         })
         .setup(|app| {
+            create_main_window(app)?;
             let handle = app.handle().clone();
             let state = app.state::<AppState>();
             if let Err(e) = set_ptt_key(handle, state, DEFAULT_PTT_KEY.into()) {
@@ -228,7 +290,17 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             startup_options,
-            join,
+            dev_join,
+            account::build_info,
+            account::restore,
+            account::login,
+            account::register,
+            account::logout,
+            account::api,
+            account::upload,
+            account::download,
+            account::image_data,
+            account::join_voice,
             leave,
             set_voice_mode,
             audio_devices,
@@ -262,15 +334,20 @@ mod tests {
             "--voice-activation",
             "--join",
             "--share",
+            "--profile",
+            "bob-2",
         ]);
         assert_eq!(opts.server.as_deref(), Some("http://example.org"));
         assert_eq!(opts.name.as_deref(), Some("bob"));
         assert_eq!(opts.room.as_deref(), Some("lobby"));
         assert!(opts.voice_activation && opts.join && opts.share);
+        assert_eq!(opts.profile.as_deref(), Some("bob-2"));
     }
 
     #[test]
     fn ignores_unknown_and_incomplete_options() {
+        // Profile names end up in a file name.
+        assert_eq!(parse(&["--profile", "../x"]).profile, None);
         let opts = parse(&["--bogus", "--name"]);
         assert_eq!(opts.name, None);
         assert!(!opts.join);

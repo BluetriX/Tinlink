@@ -11,13 +11,14 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "Tinlink",
-        "width": 440,
-        "height": 720
+        "width": 1100,
+        "height": 760
       }
     ],
     "security": {
-      "csp": "default-src 'self'; style-src 'self'; connect-src ipc: http://ipc.localhost"
+      "csp": "default-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost"
     }
   },
   "bundle": {

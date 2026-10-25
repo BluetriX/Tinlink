@@ -36,11 +36,12 @@ pub struct Session {
     audio: PlatformAudio,
 }
 
+/// A LiveKit URL and access token, from the dev endpoint or a channel.
 #[derive(Deserialize)]
-struct TokenResponse {
-    url: String,
-    token: String,
-    identity: String,
+pub struct TokenResponse {
+    pub url: String,
+    pub token: String,
+    pub identity: String,
 }
 
 impl std::fmt::Debug for TokenResponse {
@@ -54,12 +55,8 @@ impl std::fmt::Debug for TokenResponse {
 }
 
 /// Fetches a LiveKit token from the Tinlink server's development endpoint.
-async fn fetch_token(server: &str, name: &str, room: &str) -> Result<TokenResponse> {
-    let client = reqwest::Client::builder()
-        // Caddy serves https://localhost with its own local CA during development.
-        .danger_accept_invalid_certs(cfg!(debug_assertions))
-        .timeout(Duration::from_secs(10))
-        .build()?;
+pub async fn fetch_token(server: &str, name: &str, room: &str) -> Result<TokenResponse> {
+    let client = crate::backend::http_client();
     let url = format!("{}/api/voice/token", server.trim_end_matches('/'));
     let resp = client
         .post(&url)
@@ -78,14 +75,10 @@ async fn fetch_token(server: &str, name: &str, room: &str) -> Result<TokenRespon
 impl Session {
     pub async fn join(
         app: AppHandle,
-        server: &str,
-        name: &str,
-        room_name: &str,
+        token: TokenResponse,
         voice: &Voice,
         audio_prefs: &AudioPrefs,
     ) -> Result<Self> {
-        let token = fetch_token(server, name, room_name).await?;
-
         // Must exist before the first track is created so WebRTC captures
         // and plays out through the real devices (with AEC, NS and AGC).
         let audio = PlatformAudio::new().context("no audio devices available")?;
@@ -98,7 +91,7 @@ impl Session {
             .await
             .with_context(|| format!("cannot connect to LiveKit at {}", token.url))?;
         let room = Arc::new(room);
-        tracing::info!(identity = %token.identity, room = %room_name, "joined");
+        tracing::info!(identity = %token.identity, room = %room.name(), "joined");
 
         let mic = LocalAudioTrack::create_audio_track("microphone", audio.rtc_source());
         // Attach before publishing so push-to-talk starts muted.

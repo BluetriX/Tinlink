@@ -158,10 +158,17 @@ Rules worth knowing:
 
 ## Desktop client
 
-The prototype in `apps/desktop` joins a room, publishes the microphone with
-push-to-talk or voice activation, shows participants with speaking indicator
-and link statistics (RTT to the SFU, jitter, loss, jitter buffer delay), shares
-a screen and opens a native window for every remote screen share.
+`apps/desktop` is a client for the server above: log in or create an account,
+create groups or join one with an invite code, browse the channel tree,
+chat with history, live updates and file attachments (images inline), see
+who is in which voice channel, join a channel's voice, and create your own
+(temporary) rooms in the "Rooms" category. In voice: push-to-talk or voice
+activation, speaking indicators, link statistics (RTT to the SFU, jitter,
+loss, jitter buffer delay), screen sharing, and a native window for every
+remote screen share.
+
+The login is kept in the app data directory; all HTTP and the gateway
+WebSocket run in the Rust core, the WebView never sees the token.
 
 All media runs natively in the Rust core through the LiveKit SDK (libwebrtc),
 never in the WebView:
@@ -184,12 +191,18 @@ libwebrtc requires.
 
 ```sh
 cargo run -p tinlink-desktop
-# Second instance for testing, joining automatically:
-cargo run -p tinlink-desktop -- --name bob --room lobby --voice-activation --join
+# Second instance with its own login and settings:
+cargo run -p tinlink-desktop -- --profile bob
 ```
 
-Options: `--server URL` (default `https://localhost`), `--name`, `--room`,
-`--voice-activation`, `--join`, `--share` (share the first screen after joining). Debug builds accept the self-signed
+`--profile NAME` keeps a separate login and WebView storage, e.g. for two
+accounts on one PC. Debug builds also offer a "join with a dev token" form
+(server needs `TINLINK_DEV_INSECURE_TOKENS=true`); the command line options
+`--server URL`, `--name`, `--room`, `--voice-activation`, `--join` and `--share`
+use that flow for quick media tests, e.g.
+`cargo run -p tinlink-desktop -- --name bob --room lobby --voice-activation --join`.
+With `TINLINK_DEVTOOLS_PORT=9222` a debug build opens the WebView's DevTools
+protocol on that port for UI automation. Debug builds accept the self-signed
 certificate of the local stack; release builds do not.
 
 Push-to-talk uses a global hotkey (default `F8`, changeable in the UI, e.g.

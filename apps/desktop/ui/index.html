@@ -7,46 +7,103 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <main>
-    <form id="join-form">
-      <label>Server <input id="server" value="https://localhost" required></label>
-      <label>Name <input id="name" required maxlength="32" autocomplete="off"></label>
-      <label>Room <input id="room" value="lobby" required></label>
+  <!-- Login -->
+  <main id="login-view" class="center" hidden>
+    <form id="login-form" class="card">
+      <h1>Tinlink</h1>
+      <label>Server <input id="login-server" value="https://localhost" required></label>
+      <label>User name <input id="login-name" required maxlength="32" autocomplete="username"></label>
+      <label id="display-name-row" hidden>Display name <input id="login-display" maxlength="64"></label>
+      <label>Password <input id="login-password" type="password" required autocomplete="current-password"></label>
       <div class="row">
-        <button id="join" type="submit">Join</button>
-        <button id="leave" type="button" disabled>Leave</button>
+        <button id="login-submit" type="submit">Log in</button>
+        <button id="login-toggle" type="button" class="link">Create an account</button>
       </div>
+      <p id="login-error" class="error" role="alert"></p>
     </form>
 
-    <fieldset id="voice">
-      <legend>Voice</legend>
-      <label class="inline"><input type="radio" name="mode" value="pushToTalk" checked> Push to talk</label>
-      <label class="inline"><input type="radio" name="mode" value="voiceActivation"> Voice activation</label>
-      <div class="row">
-        <label>PTT key <input id="ptt-key" value="F8" size="14"></label>
-        <button id="ptt-set" type="button">Set</button>
-      </div>
-      <label>Microphone <select id="input-device"></select></label>
-      <label>Output <select id="output-device"></select></label>
-      <div id="tx" class="tx">not transmitting</div>
-    </fieldset>
-
-    <fieldset id="share" disabled>
-      <legend>Screen</legend>
-      <div class="row">
-        <select id="screens"></select>
-        <button id="share-start" type="button">Share screen</button>
-        <button id="share-stop" type="button" disabled>Stop</button>
-      </div>
-    </fieldset>
-
-    <section>
-      <h2 id="room-title">Not connected</h2>
-      <ul id="participants"></ul>
-    </section>
-
-    <p id="status" role="status"></p>
+    <details id="dev-panel" class="card" hidden>
+      <summary>Developer: join a room with a dev token</summary>
+      <form id="dev-form">
+        <label>Server <input id="dev-server" value="https://localhost" required></label>
+        <label>Name <input id="dev-name" required maxlength="32" autocomplete="off"></label>
+        <label>Room <input id="dev-room" value="lobby" required></label>
+        <button type="submit">Join</button>
+      </form>
+    </details>
   </main>
-  <script src="main.js"></script>
+
+  <!-- Main -->
+  <main id="main-view" hidden>
+    <nav id="groups" aria-label="Groups">
+      <ul id="group-list"></ul>
+      <button id="group-add" type="button" class="round" title="Create or join a group">+</button>
+    </nav>
+
+    <aside id="sidebar">
+      <header class="bar">
+        <strong id="group-name">No group</strong>
+        <button id="group-invite" type="button" class="small" hidden title="Create an invite code">Invite</button>
+      </header>
+      <div id="channel-tree"></div>
+
+      <section id="voice-panel">
+        <div id="voice-status" class="muted">Not in voice</div>
+        <div class="row">
+          <button id="voice-leave" type="button" class="small" hidden>Leave</button>
+          <button id="share-start" type="button" class="small" hidden>Share screen</button>
+          <button id="share-stop" type="button" class="small" hidden>Stop sharing</button>
+        </div>
+        <div id="tx" class="tx" hidden>not transmitting</div>
+        <ul id="participants"></ul>
+        <details id="voice-settings">
+          <summary>Voice settings</summary>
+          <label class="inline"><input type="radio" name="mode" value="pushToTalk" checked> Push to talk</label>
+          <label class="inline"><input type="radio" name="mode" value="voiceActivation"> Voice activation</label>
+          <div class="row">
+            <label>PTT key <input id="ptt-key" value="F8" size="12"></label>
+            <button id="ptt-set" type="button" class="small">Set</button>
+          </div>
+          <label>Microphone <select id="input-device"></select></label>
+          <label>Output <select id="output-device"></select></label>
+          <label>Screen <select id="screens"></select></label>
+        </details>
+      </section>
+
+      <footer class="bar">
+        <span id="me" class="ellipsis"></span>
+        <span id="gateway-dot" class="dot" title="Live updates"></span>
+        <button id="logout" type="button" class="small">Log out</button>
+      </footer>
+    </aside>
+
+    <section id="chat">
+      <header class="bar"><strong id="channel-name">Select a channel</strong></header>
+      <div id="messages" aria-live="polite"></div>
+      <form id="composer" hidden>
+        <button id="attach" type="button" class="small" title="Attach files">Attach</button>
+        <input id="file-input" type="file" multiple hidden>
+        <textarea id="message-input" rows="1" placeholder="Message" maxlength="4000"></textarea>
+        <button type="submit">Send</button>
+      </form>
+      <div id="pending-files" class="muted"></div>
+    </section>
+  </main>
+
+  <p id="status" role="status"></p>
+
+  <dialog id="dialog">
+    <form method="dialog" id="dialog-form">
+      <h2 id="dialog-title"></h2>
+      <div id="dialog-body"></div>
+      <p id="dialog-error" class="error"></p>
+      <div class="row end">
+        <button value="cancel" type="button" id="dialog-cancel">Cancel</button>
+        <button value="ok" type="submit" id="dialog-ok">OK</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="app.js"></script>
 </body>
 </html>
