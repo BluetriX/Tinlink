@@ -16,6 +16,7 @@ use tokio::task::JoinHandle;
 
 use crate::AppState;
 use crate::audio::AudioPrefs;
+use crate::muted_speech::MutedSpeechMonitor;
 use crate::screen::{ScreenShare, ShareInfo};
 use crate::stats::{self, LinkStats};
 use crate::viewer::Viewer;
@@ -35,6 +36,8 @@ pub struct Session {
     tasks: Vec<JoinHandle<()>>,
     /// Keeps the platform audio device module (WASAPI capture and playout) alive.
     audio: PlatformAudio,
+    /// Beeps when the user talks while nothing is transmitted.
+    _muted_speech: MutedSpeechMonitor,
 }
 
 /// A LiveKit URL and access token, from the dev endpoint or a channel.
@@ -103,6 +106,17 @@ impl Session {
         }
         voice.resync();
 
+        let muted_speech = {
+            let (room, app, hint_app) = (room.clone(), app.clone(), app.clone());
+            MutedSpeechMonitor::start(
+                audio_prefs.input_name(&audio),
+                move || mic_published(&room) && app.state::<AppState>().voice.transmitting(),
+                move || {
+                    let _ = hint_app.emit("muted-speech", ());
+                },
+            )
+        };
+
         let link_stats = Arc::new(Mutex::new(HashMap::new()));
         let tasks = vec![
             tokio::spawn(event_loop(app.clone(), room.clone(), mic.clone(), events)),
@@ -117,6 +131,7 @@ impl Session {
             share: None,
             tasks,
             audio,
+            _muted_speech: muted_speech,
         })
     }
 

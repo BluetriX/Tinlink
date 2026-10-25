@@ -206,6 +206,7 @@ $("dev-form").addEventListener("submit", async (ev) => {
     room,
   }));
   if (ok) {
+    unlockAudio();
     await showMain(null);
     voiceJoined({ id: room, name: room, dev: true });
   }
@@ -701,7 +702,43 @@ listen("gateway-status", (ev) => {
 
 // ------------------------------------------------------------------ voice
 
+// Created on a click (join), so the WebView's autoplay policy allows it.
+let audioContext = null;
+function unlockAudio() {
+  try {
+    audioContext ??= new AudioContext();
+    audioContext.resume();
+  } catch {
+    // no beeps then
+  }
+}
+
+/** Two short, quiet tones: "you are talking, but nobody hears you". */
+function playMutedBeep() {
+  if (!audioContext) return;
+  const t = audioContext.currentTime;
+  for (const [offset, freq] of [[0, 880], [0.18, 660]]) {
+    const osc = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0, t + offset);
+    gain.gain.linearRampToValueAtTime(0.08, t + offset + 0.02);
+    gain.gain.linearRampToValueAtTime(0, t + offset + 0.14);
+    osc.connect(gain).connect(audioContext.destination);
+    osc.start(t + offset);
+    osc.stop(t + offset + 0.15);
+  }
+}
+
+listen("muted-speech", () => {
+  playMutedBeep();
+  $("muted-hint").hidden = false;
+  clearTimeout(playMutedBeep.timer);
+  playMutedBeep.timer = setTimeout(() => { $("muted-hint").hidden = true; }, 6000);
+});
+
 async function joinVoice(ch) {
+  unlockAudio();
   setStatus(`Joining ${ch.name}…`);
   const info = await run(() => invoke("join_voice", { channelId: ch.id }));
   if (!info) return;

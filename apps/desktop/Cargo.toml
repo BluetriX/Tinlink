@@ -19,6 +19,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 base64.workspace = true
 bytemuck = "1"
+cpal = "0.18"
 futures-util = "0.3"
 # All media (capture, Opus, AEC, playout, screen capture, video encode/decode)
 # runs natively in libwebrtc via the LiveKit SDK, never in the WebView.

@@ -62,6 +62,17 @@ impl AudioPrefs {
     }
 }
 
+impl AudioPrefs {
+    /// Name of the selected microphone, `None` for the system default.
+    pub fn input_name(&self, audio: &PlatformAudio) -> Option<String> {
+        let id = self.input.lock().unwrap().clone()?;
+        audio
+            .recording_devices()
+            .find(|d| d.id.as_str() == id)
+            .map(|d| d.name)
+    }
+}
+
 pub fn list(audio: &PlatformAudio) -> AudioDevices {
     AudioDevices {
         inputs: audio

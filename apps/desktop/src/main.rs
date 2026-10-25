@@ -5,6 +5,7 @@ mod account;
 mod audio;
 mod backend;
 mod border;
+mod muted_speech;
 mod screen;
 mod session;
 mod stats;
