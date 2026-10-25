@@ -1,8 +1,6 @@
 //! Test helpers: an in-process app backed by a fresh database per test.
 #![allow(dead_code)] // each test binary uses a different subset of the helpers
 
-use std::sync::Arc;
-
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
@@ -61,11 +59,7 @@ impl TestApp {
     }
 
     pub fn with_config(db: PgPool, config: Config) -> Self {
-        let state = AppState {
-            config: Arc::new(config),
-            db,
-            events: Default::default(),
-        };
+        let state = AppState::new(config, db);
         Self {
             router: router(state.clone()),
             state,

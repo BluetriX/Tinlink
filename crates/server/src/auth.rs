@@ -138,6 +138,10 @@ pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
 ) -> AppResult<Json<SessionResponse>> {
+    let key = req.name.to_ascii_lowercase();
+    if let Some(wait) = state.login_limiter.blocked_for(&key) {
+        return Err(AppError::TooManyRequests(wait.as_secs()));
+    }
     let row: Option<(Uuid, String, String, String)> =
         sqlx::query_as("SELECT id, name, display_name, password_hash FROM users WHERE name = $1")
             .bind(req.name.to_ascii_lowercase())
@@ -156,7 +160,11 @@ pub async fn login(
         None => (DUMMY_HASH.clone(), None),
     };
     let valid = verify_password(req.password, stored_hash).await?;
-    let user = user.filter(|_| valid).ok_or(AppError::Unauthorized)?;
+    let Some(user) = user.filter(|_| valid) else {
+        state.login_limiter.record_failure(&key);
+        return Err(AppError::Unauthorized);
+    };
+    state.login_limiter.reset(&key);
     let token = create_session(&state, user.id).await?;
     Ok(Json(SessionResponse { token, user }))
 }

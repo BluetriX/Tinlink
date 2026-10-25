@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use anyhow::Result;
 use tinlink_server::config::Config;
 use tinlink_server::{AppState, connect_db, router};
@@ -13,7 +11,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let config = Arc::new(Config::from_env()?);
+    let config = Config::from_env()?;
     if config.dev_insecure_tokens {
         tracing::warn!(
             "TINLINK_DEV_INSECURE_TOKENS is enabled: voice tokens are issued without authentication"
@@ -24,11 +22,7 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     tracing::info!(addr = %config.bind, domain = %config.domain, "tinlink server listening");
 
-    let state = AppState {
-        config,
-        db,
-        events: Default::default(),
-    };
+    let state = AppState::new(config, db);
     tinlink_server::tasks::spawn(state.clone());
 
     axum::serve(listener, router(state))

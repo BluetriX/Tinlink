@@ -811,3 +811,30 @@ async fn only_owner_deletes_group(db: PgPool) {
             .is_empty()
     );
 }
+
+#[sqlx::test(migrator = "tinlink_server::MIGRATOR")]
+async fn login_is_rate_limited_per_user(db: PgPool) {
+    let app = TestApp::new(db);
+    app.register("erik").await;
+    let login = |password: &'static str| {
+        let app = &app;
+        async move {
+            app.request(
+                Method::POST,
+                "/api/auth/login",
+                None,
+                Some(json!({"name": "erik", "password": password})),
+            )
+            .await
+            .status
+        }
+    };
+    for _ in 0..10 {
+        assert_eq!(login("wrong password").await, StatusCode::UNAUTHORIZED);
+    }
+    // Even the right password is refused while blocked.
+    assert_eq!(
+        login("correct horse battery").await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}

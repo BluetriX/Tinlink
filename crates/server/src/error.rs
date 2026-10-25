@@ -17,6 +17,9 @@ pub enum AppError {
     BadRequest(String),
     #[error("{0}")]
     Conflict(String),
+    /// Retry after the given number of seconds.
+    #[error("too many attempts, retry in {0} seconds")]
+    TooManyRequests(u64),
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
 }
@@ -49,6 +52,7 @@ impl IntoResponse for AppError {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Conflict(_) => StatusCode::CONFLICT,
+            Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
             Self::Internal(err) => {
                 tracing::error!(error = ?err, "internal error");
                 StatusCode::INTERNAL_SERVER_ERROR
