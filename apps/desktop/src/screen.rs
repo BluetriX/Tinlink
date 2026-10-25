@@ -29,9 +29,11 @@ use livekit::webrtc::rtp_parameters::DegradationPreference;
 use livekit::webrtc::video_frame::{EncodedFrameType, EncodedVideoCodec, EncodedVideoFrame};
 use livekit::webrtc::video_source::native::NativeVideoSource;
 use serde::Serialize;
+use tauri::AppHandle;
 use tinlink_hwenc::HardwareEncoder;
 use tokio::sync::oneshot;
 
+use crate::border::ShareBorder;
 use crate::viewer::fit;
 
 /// Size, frame rate and bitrate cap of one way of encoding.
@@ -105,13 +107,14 @@ pub struct ScreenShare {
     thread: Option<JoinHandle<()>>,
     track: LocalVideoTrack,
     info: ShareInfo,
+    border: Option<ShareBorder>,
 }
 
 /// Sent by the capture thread once the first frame decided size and encoder.
 type Ready = Result<(NativeVideoSource, ShareInfo)>;
 
 impl ScreenShare {
-    pub async fn start(room: &Room, source_id: Option<u64>) -> Result<Self> {
+    pub async fn start(app: &AppHandle, room: &Room, source_id: Option<u64>) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = oneshot::channel();
         let thread = {
@@ -165,15 +168,20 @@ impl ScreenShare {
                 },
             )
             .await;
-        let share = Self {
+        let mut share = Self {
             stop,
             thread: Some(thread),
             track,
             info,
+            border: None,
         };
         if let Err(e) = published {
             share.stop(room).await;
             return Err(e).context("cannot publish screen share");
+        }
+        match ShareBorder::show(app, share.info.area) {
+            Ok(border) => share.border = Some(border),
+            Err(e) => tracing::warn!("cannot show share border: {e:#}"),
         }
         Ok(share)
     }
@@ -183,6 +191,7 @@ impl ScreenShare {
     }
 
     pub async fn stop(mut self, room: &Room) {
+        self.border = None;
         self.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
             let _ = tokio::task::spawn_blocking(move || thread.join()).await;

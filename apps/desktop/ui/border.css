@@ -1,0 +1,27 @@
+/* Frame around the shared monitor. The window is transparent, click-through
+   and excluded from capture, so viewers never see it. */
+html, body {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.frame {
+  position: fixed;
+  inset: 0;
+  border: 3px solid #2f6feb;
+}
+
+.tag {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 2px 10px;
+  border-radius: 0 0 6px 6px;
+  background: #2f6feb;
+  color: #fff;
+  font: 12px "Segoe UI", system-ui, sans-serif;
+}

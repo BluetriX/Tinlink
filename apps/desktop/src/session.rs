@@ -27,6 +27,7 @@ const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(200);
 const STATS_EVERY: u32 = 5;
 
 pub struct Session {
+    app: AppHandle,
     room: Arc<Room>,
     identity: String,
     livekit_url: String,
@@ -105,10 +106,11 @@ impl Session {
         let link_stats = Arc::new(Mutex::new(HashMap::new()));
         let tasks = vec![
             tokio::spawn(event_loop(app.clone(), room.clone(), mic.clone(), events)),
-            tokio::spawn(snapshot_loop(app, room.clone(), mic, link_stats)),
+            tokio::spawn(snapshot_loop(app.clone(), room.clone(), mic, link_stats)),
         ];
 
         Ok(Self {
+            app,
             room,
             identity: token.identity,
             livekit_url: token.url,
@@ -133,7 +135,7 @@ impl Session {
     pub async fn start_share(&mut self, source_id: Option<u64>) -> Result<ShareInfo> {
         let share = match self.share.take() {
             Some(share) => share,
-            None => ScreenShare::start(&self.room, source_id).await?,
+            None => ScreenShare::start(&self.app, &self.room, source_id).await?,
         };
         let info = share.info().clone();
         self.share = Some(share);

@@ -4,6 +4,7 @@
 mod account;
 mod audio;
 mod backend;
+mod border;
 mod screen;
 mod session;
 mod stats;
@@ -221,7 +222,17 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
         .find(|w| w.label == "main")
         .cloned()
         .expect("main window is configured");
-    let mut builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?;
+    let builder = tauri::WebviewWindowBuilder::from_config(app.handle(), &config)?;
+    webview_environment(app.handle(), builder)?.build()?;
+    Ok(())
+}
+
+/// Applies the profile's WebView data folder and debug flags. Every window
+/// must use the same settings to share one WebView2 browser process.
+fn webview_environment<'a>(
+    app: &AppHandle,
+    mut builder: tauri::WebviewWindowBuilder<'a, tauri::Wry, AppHandle>,
+) -> tauri::Result<tauri::WebviewWindowBuilder<'a, tauri::Wry, AppHandle>> {
     if let Some(profile) = &app.state::<StartupOptions>().profile {
         let dir = app
             .path()
@@ -238,8 +249,7 @@ fn create_main_window(app: &tauri::App) -> tauri::Result<()> {
             "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --remote-debugging-port={port}"
         ));
     }
-    builder.build()?;
-    Ok(())
+    Ok(builder)
 }
 
 fn main() {
