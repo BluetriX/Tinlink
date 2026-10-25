@@ -34,6 +34,7 @@ Any JavaScript that is unavoidable is vendored as a single pinned file with a ch
 ## Repository layout
 
 ```
+apps/desktop      desktop client (Tauri 2), media in the Rust core via the LiveKit SDK
 crates/protocol   shared types: federated user ids, permission model
 crates/server     API server and LiveKit token issuer
 deploy/           docker compose stack (Caddy, server, PostgreSQL, LiveKit)
@@ -48,6 +49,9 @@ cargo test
 cargo clippy --all-targets
 ```
 
+These cover the server crates (the default workspace members). The desktop app
+is checked with `-p tinlink-desktop`, see below.
+
 Run the full stack locally:
 
 ```sh
@@ -60,6 +64,11 @@ curl -k https://localhost/health
 For a public server set `use_external_ip: true` in `deploy/livekit.yaml`,
 otherwise LiveKit only announces local addresses and remote clients cannot connect media.
 
+When the stack runs in Docker inside WSL2 and the client on Windows, LiveKit would
+announce its container address, which Windows cannot reach. Set
+`LIVEKIT_NODE_IP` in `deploy/.env` to the WSL address (`hostname -I | cut -d' ' -f1`
+inside WSL; it changes when WSL restarts) and run `docker compose up -d` again.
+
 Request a development voice token (only with `TINLINK_DEV_INSECURE_TOKENS=true`):
 
 ```sh
@@ -67,6 +76,46 @@ curl -k -X POST https://localhost/api/voice/token \
   -H 'content-type: application/json' \
   -d '{"name":"erik","room":"lobby"}'
 ```
+
+## Desktop client
+
+The prototype in `apps/desktop` joins a room, publishes the microphone with
+push-to-talk or voice activation, shows participants with speaking indicator
+and link statistics (RTT to the SFU, jitter, loss, jitter buffer delay), shares
+a screen and opens a native window for every remote screen share.
+
+All media runs natively in the Rust core through the LiveKit SDK (libwebrtc),
+never in the WebView:
+
+- Audio: WebRTC's audio device module (WASAPI on Windows) with its echo
+  cancellation, noise suppression and gain control; Opus with DTX and RED.
+- Screen sharing: libwebrtc's desktop capturer (Windows Graphics Capture, DXGI
+  fallback), H.264 with hardware encoding when available (NVENC, AMF, Quick Sync).
+- Viewing: decoded frames are scaled with libyuv and drawn with softbuffer;
+  only the newest frame is rendered, and the receiver uses zero playout delay.
+
+The UI is a static page in `apps/desktop/ui` (no npm, no bundler).
+
+Requirements on Windows: Rust (stable, MSVC), Visual Studio Build Tools with the
+C++ workload, WebView2 (preinstalled on Windows 11). The first build downloads a
+prebuilt libwebrtc. `.cargo/config.toml` links the static C runtime, which
+libwebrtc requires.
+
+```sh
+cargo run -p tinlink-desktop
+# Second instance for testing, joining automatically:
+cargo run -p tinlink-desktop -- --name bob --room lobby --voice-activation --join
+```
+
+Options: `--server URL` (default `https://localhost`), `--name`, `--room`,
+`--voice-activation`, `--join`. Debug builds accept the self-signed
+certificate of the local stack; release builds do not.
+
+Push-to-talk uses a global hotkey (default `F8`, changeable in the UI, e.g.
+`Ctrl+Shift+Space`). A key can only be registered by one program at a time, so a
+second instance on the same PC should use voice activation or another key.
+Use headphones when testing two instances on one PC, otherwise each instance
+plays the other's microphone back into the shared microphone.
 
 ## Roadmap
 
@@ -86,4 +135,5 @@ The protocol crate (`crates/protocol`) is dual-licensed under
 [MIT](crates/protocol/LICENSE-MIT) or [Apache-2.0](crates/protocol/LICENSE-APACHE),
 so third-party clients can use it freely.
 
-All dependencies use permissive licenses; this is enforced in CI by `cargo deny`.
+All dependencies use permissive licenses, except a few MPL-2.0 crates that the
+desktop app inherits from Tauri (listed in `deny.toml`); this is enforced in CI by `cargo deny`.

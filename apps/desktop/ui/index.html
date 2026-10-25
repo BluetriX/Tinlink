@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tinlink</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <form id="join-form">
+      <label>Server <input id="server" value="https://localhost" required></label>
+      <label>Name <input id="name" required maxlength="32" autocomplete="off"></label>
+      <label>Room <input id="room" value="lobby" required></label>
+      <div class="row">
+        <button id="join" type="submit">Join</button>
+        <button id="leave" type="button" disabled>Leave</button>
+      </div>
+    </form>
+
+    <fieldset id="voice">
+      <legend>Voice</legend>
+      <label class="inline"><input type="radio" name="mode" value="pushToTalk" checked> Push to talk</label>
+      <label class="inline"><input type="radio" name="mode" value="voiceActivation"> Voice activation</label>
+      <div class="row">
+        <label>PTT key <input id="ptt-key" value="F8" size="14"></label>
+        <button id="ptt-set" type="button">Set</button>
+      </div>
+      <div id="tx" class="tx">not transmitting</div>
+    </fieldset>
+
+    <fieldset id="share" disabled>
+      <legend>Screen</legend>
+      <div class="row">
+        <select id="screens"></select>
+        <button id="share-start" type="button">Share screen</button>
+        <button id="share-stop" type="button" disabled>Stop</button>
+      </div>
+    </fieldset>
+
+    <section>
+      <h2 id="room-title">Not connected</h2>
+      <ul id="participants"></ul>
+    </section>
+
+    <p id="status" role="status"></p>
+  </main>
+  <script src="main.js"></script>
+</body>
+</html>
