@@ -1,0 +1,4 @@
+# The prebuilt libwebrtc used by the LiveKit SDK links the static MSVC
+# runtime (/MT); everything else must match or linking fails (LNK2038).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
