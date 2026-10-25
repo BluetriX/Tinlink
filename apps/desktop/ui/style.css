@@ -386,6 +386,18 @@ label.inline input {
   margin-left: 14px;
 }
 
+.share-info {
+  font-size: 12px;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+
+.muted-hint {
+  font-size: 12px;
+  color: var(--error);
+  margin: 4px 0;
+}
+
 .tx {
   color: var(--muted);
   font-size: 12px;

@@ -88,6 +88,23 @@ impl Voice {
         inner.apply();
     }
 
+    /// Forces the track's enabled state to match the voice state. Needed
+    /// after (re)publishing: muting an unpublished track only sets a flag
+    /// that the new sender does not pick up, and `mute()` is a no-op while
+    /// the flag already says muted.
+    pub fn resync(&self) {
+        let inner = self.inner.lock().unwrap();
+        let Some((mic, rt)) = &inner.mic else { return };
+        let on = inner.transmitting();
+        let _rt = rt.enter();
+        mic.rtc_track().set_enabled(on);
+        if on {
+            mic.unmute();
+        } else {
+            mic.mute();
+        }
+    }
+
     pub fn transmitting(&self) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.mic.is_some() && inner.transmitting()

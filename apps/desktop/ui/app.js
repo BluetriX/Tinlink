@@ -716,6 +716,7 @@ function voiceJoined(ch) {
   $("voice-leave").hidden = false;
   $("share-start").hidden = !(ch.dev || can(ch.permissions, "SHARE_SCREEN"));
   $("share-stop").hidden = true;
+  $("share-info").hidden = true;
   $("tx").hidden = false;
 }
 
@@ -724,7 +725,7 @@ function voiceLeft() {
   state.snapshot = null;
   $("voice-status").textContent = "Not in voice";
   $("voice-status").classList.add("muted");
-  for (const id of ["voice-leave", "share-start", "share-stop", "tx"]) $(id).hidden = true;
+  for (const id of ["voice-leave", "share-start", "share-stop", "share-info", "tx", "muted-hint"]) $(id).hidden = true;
   $("participants").replaceChildren();
   updateSpeaking();
 }
@@ -742,14 +743,16 @@ $("share-start").addEventListener("click", async () => {
   if (!info) return;
   $("share-start").hidden = true;
   $("share-stop").hidden = false;
-  const encoder = info.encoder ?? "software H.264";
-  setStatus(`Sharing ${info.width}x${info.height} @ ${info.fps} fps (${encoder})`);
+  const encoder = info.encoder ?? "software H.264 (no hardware encoder found)";
+  $("share-info").textContent = `Sharing ${info.width}×${info.height} @ ${info.fps} fps · ${encoder}`;
+  $("share-info").hidden = false;
 });
 
 $("share-stop").addEventListener("click", async () => {
   await run(() => invoke("stop_share"));
   $("share-start").hidden = false;
   $("share-stop").hidden = true;
+  $("share-info").hidden = true;
   setStatus("Stopped sharing");
 });
 

@@ -100,6 +100,7 @@ impl Session {
         if let Err(e) = publish_mic(&room, &mic).await {
             tracing::warn!("microphone not published: {e:#}");
         }
+        voice.resync();
 
         let link_stats = Arc::new(Mutex::new(HashMap::new()));
         let tasks = vec![
@@ -219,11 +220,11 @@ async fn event_loop(
                     && (permission.can_publish_sources.is_empty()
                         || permission.can_publish_sources.contains(&MICROPHONE));
                 tracing::info!(allowed, "microphone permission changed");
-                if allowed
-                    && !mic_published(&room)
-                    && let Err(e) = publish_mic(&room, &mic).await
-                {
-                    tracing::warn!("{e:#}");
+                if allowed && !mic_published(&room) {
+                    match publish_mic(&room, &mic).await {
+                        Ok(()) => app.state::<AppState>().voice.resync(),
+                        Err(e) => tracing::warn!("{e:#}"),
+                    }
                 }
             }
             RoomEvent::Disconnected { reason } => {

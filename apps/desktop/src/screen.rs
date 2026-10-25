@@ -67,6 +67,8 @@ pub struct ScreenSource {
 pub struct ShareInfo {
     /// Hardware encoder name, `None` for software encoding.
     pub encoder: Option<String>,
+    /// Captured area on the desktop (x, y, width, height in physical pixels).
+    pub area: (i32, i32, u32, u32),
     pub width: u32,
     pub height: u32,
     pub fps: u32,
@@ -295,7 +297,14 @@ impl FrameSink {
         }
         let input = (width as u32, height as u32);
         if self.output.is_none() {
-            let output = self.choose_output(input);
+            tracing::debug!(
+                left = frame.left(),
+                top = frame.top(),
+                ?input,
+                "first captured frame"
+            );
+            let area = (frame.left(), frame.top(), input.0, input.1);
+            let output = self.choose_output(input, area);
             self.output = Some(output);
         }
         match self.output.as_ref() {
@@ -329,7 +338,7 @@ impl FrameSink {
 
     /// Starts the hardware encoder if there is one, else falls back to
     /// software encoding, and reports the result to [`ScreenShare::start`].
-    fn choose_output(&mut self, input: (u32, u32)) -> Output {
+    fn choose_output(&mut self, input: (u32, u32), area: (i32, i32, u32, u32)) -> Output {
         let size = output_size(input, HARDWARE.max_size);
         let resolution = VideoResolution {
             width: size.0,
@@ -363,6 +372,7 @@ impl FrameSink {
                 self.fps.store(HARDWARE.fps, Ordering::Relaxed);
                 let info = ShareInfo {
                     encoder: Some(encoder.name().to_owned()),
+                    area,
                     width: size.0,
                     height: size.1,
                     fps: HARDWARE.fps,
@@ -389,6 +399,7 @@ impl FrameSink {
                 self.fps.store(SOFTWARE.fps, Ordering::Relaxed);
                 let info = ShareInfo {
                     encoder: None,
+                    area,
                     width: size.0,
                     height: size.1,
                     fps: SOFTWARE.fps,
