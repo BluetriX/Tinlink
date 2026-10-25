@@ -1,13 +1,11 @@
-# TLS certificates are obtained automatically. For "localhost" Caddy uses
-# its own local CA.
+# TLS certificates are obtained automatically from Let's Encrypt (ports 80
+# and 443 must be reachable). For "localhost" Caddy uses its own local CA.
 
 {$TINLINK_DOMAIN} {
 	encode zstd gzip
 	reverse_proxy /api/* server:8080
 	reverse_proxy /health server:8080
-}
-
-# LiveKit signaling (WebSocket). Media itself uses UDP 50000-50100 directly.
-{$LIVEKIT_DOMAIN} {
-	reverse_proxy livekit:7880
+	# LiveKit signaling (WebSocket), so one domain and certificate suffice.
+	# Media itself uses UDP 50000-50100 and TCP 7881 directly.
+	reverse_proxy /rtc* livekit:7880
 }

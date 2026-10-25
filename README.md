@@ -71,8 +71,8 @@ docker compose up -d --build
 curl -k https://localhost/health
 ```
 
-For a public server set `use_external_ip: true` in `deploy/livekit.yaml`,
-otherwise LiveKit only announces local addresses and remote clients cannot connect media.
+To run a server that others can reach over the internet (domain, certificates,
+port forwarding), follow [docs/self-hosting.md](docs/self-hosting.md).
 
 When the stack runs in Docker inside WSL2 and the client on Windows, LiveKit would
 announce its container address, which Windows cannot reach. Set

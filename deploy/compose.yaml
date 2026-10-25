@@ -12,7 +12,6 @@ services:
       - "443:443/udp"
     environment:
       TINLINK_DOMAIN: ${TINLINK_DOMAIN}
-      LIVEKIT_DOMAIN: ${LIVEKIT_DOMAIN}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
