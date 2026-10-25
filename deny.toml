@@ -18,8 +18,10 @@ allow = [
     "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
-# Workspace crates have no license yet.
-private = { ignore = true }
+# Our own crates: AGPL server, permissive protocol crate.
+exceptions = [
+    { allow = ["AGPL-3.0-only"], crate = "tinlink-server" },
+]
 
 [bans]
 multiple-versions = "warn"

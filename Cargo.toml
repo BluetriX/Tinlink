@@ -8,6 +8,7 @@ edition = "2024"
 rust-version = "1.90"
 repository = "https://github.com/BluetriX/Tinlink"
 publish = false
+license = "AGPL-3.0-only"
 
 [workspace.dependencies]
 tinlink-protocol = { path = "crates/protocol" }

@@ -75,3 +75,15 @@ curl -k -X POST https://localhost/api/voice/token \
 3. Permissions: roles, overwrites, user-created channels with limits, moderation
 4. Files and polish: uploads, previews, mentions, web client
 5. Optional: end-to-end encryption, mobile, federation
+
+## License
+
+Tinlink is licensed under the [GNU Affero General Public License v3.0](LICENSE)
+(`AGPL-3.0-only`). If you run a modified version as a service, you must publish
+your changes.
+
+The protocol crate (`crates/protocol`) is dual-licensed under
+[MIT](crates/protocol/LICENSE-MIT) or [Apache-2.0](crates/protocol/LICENSE-APACHE),
+so third-party clients can use it freely.
+
+All dependencies use permissive licenses; this is enforced in CI by `cargo deny`.
