@@ -68,8 +68,7 @@ pub fn mentioned_names(content: &str) -> Vec<String> {
     let is_name_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-');
     let mut names: Vec<String> = Vec::new();
     let mut prev: Option<char> = None;
-    let mut chars = content.char_indices().peekable();
-    while let Some((i, c)) = chars.next() {
+    for (i, c) in content.char_indices() {
         if c == '@' && !prev.is_some_and(is_name_char) {
             let rest = &content[i + 1..];
             let end = rest.find(|c: char| !is_name_char(c)).unwrap_or(rest.len());
