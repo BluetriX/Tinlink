@@ -162,7 +162,10 @@ fn list_screens() -> Vec<screen::ScreenSource> {
 }
 
 #[tauri::command]
-async fn start_share(state: State<'_, AppState>, source_id: Option<u64>) -> CmdResult<()> {
+async fn start_share(
+    state: State<'_, AppState>,
+    source_id: Option<u64>,
+) -> CmdResult<screen::ShareInfo> {
     let mut slot = state.session.lock().await;
     let session = slot.as_mut().ok_or("not connected")?;
     session

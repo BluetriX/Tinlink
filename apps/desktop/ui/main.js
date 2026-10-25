@@ -172,9 +172,10 @@ $("share-start").addEventListener("click", async () => {
   $("share-start").disabled = true;
   try {
     const id = $("screens").value;
-    await invoke("start_share", { sourceId: id ? Number(id) : null });
+    const info = await invoke("start_share", { sourceId: id ? Number(id) : null });
     $("share-stop").disabled = false;
-    setStatus("Sharing screen");
+    const encoder = info.encoder ?? "software H.264";
+    setStatus(`Sharing ${info.width}x${info.height} @ ${info.fps} fps (${encoder})`);
   } catch (e) {
     $("share-start").disabled = false;
     setStatus(String(e), true);
