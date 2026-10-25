@@ -139,7 +139,9 @@ never in the WebView:
 - Audio: WebRTC's audio device module (WASAPI on Windows) with its echo
   cancellation, noise suppression and gain control; Opus with DTX and RED.
 - Screen sharing: libwebrtc's desktop capturer (Windows Graphics Capture, DXGI
-  fallback), H.264 with hardware encoding when available (NVENC, AMF, Quick Sync).
+  fallback), scaled to at most 1080p, 30 fps, H.264. The SDK encodes in software
+  (OpenH264) on Windows; its NVENC support is Linux only. Hardware encoding on
+  Windows (Media Foundation or NVENC feeding pre-encoded frames) is a follow-up.
 - Viewing: decoded frames are scaled with libyuv and drawn with softbuffer;
   only the newest frame is rendered, and the receiver uses zero playout delay.
 
@@ -157,7 +159,7 @@ cargo run -p tinlink-desktop -- --name bob --room lobby --voice-activation --joi
 ```
 
 Options: `--server URL` (default `https://localhost`), `--name`, `--room`,
-`--voice-activation`, `--join`. Debug builds accept the self-signed
+`--voice-activation`, `--join`, `--share` (share the first screen after joining). Debug builds accept the self-signed
 certificate of the local stack; release builds do not.
 
 Push-to-talk uses a global hotkey (default `F8`, changeable in the UI, e.g.

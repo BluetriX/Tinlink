@@ -129,7 +129,7 @@ fn render_loop(
 }
 
 /// Largest size with the frame's aspect ratio that fits into the window.
-fn fit((fw, fh): (u32, u32), (ww, wh): (u32, u32)) -> (u32, u32) {
+pub(crate) fn fit((fw, fh): (u32, u32), (ww, wh): (u32, u32)) -> (u32, u32) {
     if fw == 0 || fh == 0 {
         return (0, 0);
     }

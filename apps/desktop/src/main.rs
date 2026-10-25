@@ -41,7 +41,7 @@ struct JoinInfo {
 }
 
 /// Command line options that prefill the form, e.g.
-/// `tinlink-desktop --name bob --room lobby --voice-activation --join`.
+/// `tinlink-desktop --name bob --room lobby --voice-activation --join --share`.
 #[derive(Debug, Default, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StartupOptions {
@@ -50,6 +50,8 @@ struct StartupOptions {
     room: Option<String>,
     voice_activation: bool,
     join: bool,
+    /// Share the first screen right after joining.
+    share: bool,
 }
 
 impl StartupOptions {
@@ -62,6 +64,7 @@ impl StartupOptions {
                 "--room" => opts.room = args.next(),
                 "--voice-activation" => opts.voice_activation = true,
                 "--join" => opts.join = true,
+                "--share" => opts.share = true,
                 other => tracing::warn!("ignoring unknown argument {other}"),
             }
         }

@@ -2,8 +2,13 @@
 //!
 //! libwebrtc's desktop capturer uses Windows Graphics Capture (falling back
 //! to DXGI desktop duplication). Frames arrive as BGRA, are converted to
-//! I420 with libyuv and handed to WebRTC, which encodes them with the
-//! hardware H.264 encoder when one is available (NVENC, AMF, Quick Sync).
+//! I420 with libyuv, scaled down to at most [`MAX_SIZE`] and handed to
+//! WebRTC for encoding.
+//!
+//! The LiveKit SDK has no hardware encoder on Windows (its NVENC support is
+//! Linux only), so H.264 is encoded in software with OpenH264. The size cap
+//! keeps that affordable; hardware encoding needs pre-encoded frames from
+//! Media Foundation or NVENC and is a follow-up.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,8 +30,12 @@ use livekit::webrtc::video_source::native::NativeVideoSource;
 use serde::Serialize;
 use tokio::sync::oneshot;
 
+use crate::viewer::fit;
+
 const FPS: u32 = 30;
-const MAX_BITRATE: u64 = 8_000_000;
+const MAX_BITRATE: u64 = 6_000_000;
+/// Larger screens are scaled down to fit, keeping the aspect ratio.
+const MAX_SIZE: (u32, u32) = (1920, 1080);
 
 #[derive(Serialize)]
 pub struct ScreenSource {
@@ -72,9 +81,14 @@ impl ScreenShare {
         let (ready_tx, ready_rx) = oneshot::channel();
         let thread = {
             let stop = stop.clone();
+            let rt = tokio::runtime::Handle::current();
             std::thread::Builder::new()
                 .name("screen-capture".into())
-                .spawn(move || capture_thread(source_id, stop, ready_tx))?
+                .spawn(move || {
+                    // The video source spawns a keepalive task on creation.
+                    let _rt = rt.enter();
+                    capture_thread(source_id, stop, ready_tx)
+                })?
         };
         let source = match tokio::time::timeout(Duration::from_secs(5), ready_rx).await {
             Ok(Ok(result)) => result?,
@@ -206,11 +220,17 @@ impl FrameSink {
         if width <= 0 || height <= 0 {
             return;
         }
+        let (width, height) = (width as u32, height as u32);
+        let (out_w, out_h) = if width > MAX_SIZE.0 || height > MAX_SIZE.1 {
+            fit((width, height), MAX_SIZE)
+        } else {
+            (width, height)
+        };
         let source = self.source.get_or_insert_with(|| {
             let source = NativeVideoSource::new(
                 VideoResolution {
-                    width: width as u32,
-                    height: height as u32,
+                    width: out_w,
+                    height: out_h,
                 },
                 true,
             );
@@ -221,7 +241,7 @@ impl FrameSink {
         });
 
         // WebRTC keeps a reference to the buffer, so each frame needs its own.
-        let mut buffer = I420Buffer::new(width as u32, height as u32);
+        let mut buffer = I420Buffer::new(width, height);
         let (stride_y, stride_u, stride_v) = buffer.strides();
         let (y, u, v) = buffer.data_mut();
         // libyuv "ARGB" is BGRA in memory, which is what the capturer delivers.
@@ -234,9 +254,12 @@ impl FrameSink {
             stride_u,
             v,
             stride_v,
-            width,
-            height,
+            width as i32,
+            height as i32,
         );
+        if (out_w, out_h) != (width, height) {
+            buffer = buffer.scale(out_w as i32, out_h as i32);
+        }
         let video_frame = VideoFrame {
             rotation: VideoRotation::VideoRotation0,
             timestamp_us: self.epoch.elapsed().as_micros() as i64,

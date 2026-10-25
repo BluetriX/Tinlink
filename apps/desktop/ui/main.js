@@ -96,6 +96,8 @@ async function loadScreens() {
   }
 }
 
+let shareAfterJoin = false;
+
 $("join-form").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   $("join").disabled = true;
@@ -108,7 +110,8 @@ $("join-form").addEventListener("submit", async (ev) => {
     });
     setConnected(true);
     setStatus(`Connected as ${info.identity} via ${info.livekitUrl}`);
-    loadScreens();
+    await loadScreens();
+    if (shareAfterJoin) $("share-start").click();
   } catch (e) {
     $("join").disabled = false;
     setStatus(String(e), true);
@@ -172,6 +175,7 @@ async function init() {
     document.querySelector("input[value=voiceActivation]").checked = true;
     await invoke("set_voice_mode", { mode: "voiceActivation" });
   }
+  shareAfterJoin = opts.share;
   if (opts.join) $("join-form").requestSubmit();
 }
 

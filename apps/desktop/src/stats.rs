@@ -68,6 +68,8 @@ impl LinkStats {
     /// Combines audio stats (jitter, loss) with the video numbers of `video`.
     pub fn with_video(self, video: &LinkStats) -> Self {
         Self {
+            // A muted microphone reports no transport stats.
+            rtt_ms: self.rtt_ms.or(video.rtt_ms),
             video_fps: video.video_fps,
             video_size: video.video_size,
             decode_ms: video.decode_ms,
