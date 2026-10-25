@@ -15,6 +15,7 @@ use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::AppState;
+use crate::audio::AudioPrefs;
 use crate::screen::ScreenShare;
 use crate::stats::{self, LinkStats};
 use crate::viewer::Viewer;
@@ -32,7 +33,7 @@ pub struct Session {
     share: Option<ScreenShare>,
     tasks: Vec<JoinHandle<()>>,
     /// Keeps the platform audio device module (WASAPI capture and playout) alive.
-    _audio: PlatformAudio,
+    audio: PlatformAudio,
 }
 
 #[derive(Deserialize)]
@@ -81,12 +82,14 @@ impl Session {
         name: &str,
         room_name: &str,
         voice: &Voice,
+        audio_prefs: &AudioPrefs,
     ) -> Result<Self> {
         let token = fetch_token(server, name, room_name).await?;
 
         // Must exist before the first track is created so WebRTC captures
         // and plays out through the real devices (with AEC, NS and AGC).
         let audio = PlatformAudio::new().context("no audio devices available")?;
+        audio_prefs.apply(&audio);
 
         let mut options = RoomOptions::default();
         options.auto_subscribe = true;
@@ -125,7 +128,7 @@ impl Session {
             livekit_url: token.url,
             share: None,
             tasks,
-            _audio: audio,
+            audio,
         })
     }
 
@@ -135,6 +138,10 @@ impl Session {
 
     pub fn livekit_url(&self) -> &str {
         &self.livekit_url
+    }
+
+    pub fn audio(&self) -> &PlatformAudio {
+        &self.audio
     }
 
     pub async fn start_share(&mut self, source_id: Option<u64>) -> Result<()> {

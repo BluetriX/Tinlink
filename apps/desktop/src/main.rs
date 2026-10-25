@@ -1,6 +1,7 @@
 // Release builds run without a console window.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod audio;
 mod screen;
 mod session;
 mod stats;
@@ -14,6 +15,7 @@ use tauri::{AppHandle, Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tracing_subscriber::EnvFilter;
 
+use crate::audio::{AudioDevices, AudioPrefs, DeviceKind};
 use crate::session::Session;
 use crate::voice::{Voice, VoiceMode};
 
@@ -23,6 +25,7 @@ struct AppState {
     /// The active room connection, if any.
     session: tokio::sync::Mutex<Option<Session>>,
     voice: Voice,
+    audio_prefs: AudioPrefs,
     ptt_key: Mutex<Option<Shortcut>>,
 }
 
@@ -89,7 +92,7 @@ async fn join(
     if let Some(old) = slot.take() {
         old.leave(&state.voice).await;
     }
-    let session = Session::join(app, &server, &name, &room, &state.voice)
+    let session = Session::join(app, &server, &name, &room, &state.voice, &state.audio_prefs)
         .await
         .map_err(|e| format!("{e:#}"))?;
     let info = JoinInfo {
@@ -104,6 +107,30 @@ async fn join(
 async fn leave(state: State<'_, AppState>) -> CmdResult<()> {
     if let Some(session) = state.session.lock().await.take() {
         session.leave(&state.voice).await;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn audio_devices(state: State<'_, AppState>) -> CmdResult<AudioDevices> {
+    if let Some(session) = state.session.lock().await.as_ref() {
+        return Ok(audio::list(session.audio()));
+    }
+    let platform = livekit::PlatformAudio::new().map_err(err)?;
+    Ok(audio::list(&platform))
+}
+
+/// Selects a microphone or output device; `None` restores the system
+/// default from the next join on.
+#[tauri::command]
+async fn set_audio_device(
+    state: State<'_, AppState>,
+    kind: DeviceKind,
+    id: Option<String>,
+) -> CmdResult<()> {
+    state.audio_prefs.set(kind, id.clone());
+    if let (Some(session), Some(id)) = (state.session.lock().await.as_ref(), id) {
+        audio::switch(session.audio(), kind, &id).map_err(|e| format!("{e:#}"))?;
     }
     Ok(())
 }
@@ -182,6 +209,7 @@ fn main() {
         .manage(AppState {
             session: tokio::sync::Mutex::new(None),
             voice: Voice::default(),
+            audio_prefs: AudioPrefs::default(),
             ptt_key: Mutex::new(None),
         })
         .setup(|app| {
@@ -203,6 +231,8 @@ fn main() {
             join,
             leave,
             set_voice_mode,
+            audio_devices,
+            set_audio_device,
             set_ptt_key,
             list_screens,
             start_share,

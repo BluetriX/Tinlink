@@ -7,6 +7,26 @@ const { listen } = window.__TAURI__.event;
 
 const $ = (id) => document.getElementById(id);
 
+// Remembered settings. Storage may be unavailable; the UI works without it.
+const settings = {
+  load() {
+    try {
+      return JSON.parse(localStorage.getItem("tinlink.settings")) || {};
+    } catch {
+      return {};
+    }
+  },
+  save(patch) {
+    try {
+      localStorage.setItem("tinlink.settings", JSON.stringify({ ...settings.load(), ...patch }));
+    } catch {
+      // ignore
+    }
+  },
+};
+// Test instances started with command line options do not overwrite settings.
+let persistForm = true;
+
 function setStatus(text, isError = false) {
   $("status").textContent = text;
   $("status").classList.toggle("error", isError);
@@ -110,6 +130,13 @@ $("join-form").addEventListener("submit", async (ev) => {
     });
     setConnected(true);
     setStatus(`Connected as ${info.identity} via ${info.livekitUrl}`);
+    if (persistForm) {
+      settings.save({
+        server: $("server").value.trim(),
+        name: $("name").value.trim(),
+        room: $("room").value.trim(),
+      });
+    }
     await loadScreens();
     if (shareAfterJoin) $("share-start").click();
   } catch (e) {
@@ -125,13 +152,17 @@ $("leave").addEventListener("click", async () => {
 });
 
 for (const radio of document.querySelectorAll("input[name=mode]")) {
-  radio.addEventListener("change", () => invoke("set_voice_mode", { mode: radio.value }));
+  radio.addEventListener("change", () => {
+    invoke("set_voice_mode", { mode: radio.value });
+    if (persistForm) settings.save({ mode: radio.value });
+  });
 }
 
 $("ptt-set").addEventListener("click", async () => {
   try {
     const key = await invoke("set_ptt_key", { key: $("ptt-key").value.trim() });
     setStatus(`Push-to-talk key: ${key}`);
+    if (persistForm) settings.save({ pttKey: $("ptt-key").value.trim() });
   } catch (e) {
     setStatus(String(e), true);
   }
@@ -162,12 +193,56 @@ listen("disconnected", (ev) => {
   setConnected(false);
   setStatus(`Disconnected: ${ev.payload}`, true);
 });
-async function init() {
-  // The core registers the default key at startup; registering again from
-  // here surfaces a conflict (e.g. a second instance) in the status line.
-  $("ptt-set").click();
+async function loadAudioDevices(saved) {
+  try {
+    const devices = await invoke("audio_devices");
+    for (const [kind, list] of [["input", devices.inputs], ["output", devices.outputs]]) {
+      const select = $(`${kind}-device`);
+      const def = document.createElement("option");
+      def.value = "";
+      def.textContent = "System default";
+      select.replaceChildren(
+        def,
+        ...list.map((d) => {
+          const o = document.createElement("option");
+          o.value = d.id;
+          o.textContent = d.name;
+          return o;
+        }),
+      );
+      const wanted = saved[`${kind}Device`];
+      if (wanted && list.some((d) => d.id === wanted)) {
+        select.value = wanted;
+        await invoke("set_audio_device", { kind, id: wanted });
+      }
+      select.addEventListener("change", async () => {
+        try {
+          await invoke("set_audio_device", { kind, id: select.value || null });
+          settings.save({ [`${kind}Device`]: select.value });
+        } catch (e) {
+          setStatus(String(e), true);
+        }
+      });
+    }
+  } catch (e) {
+    setStatus(`Cannot list audio devices: ${e}`, true);
+  }
+}
 
+async function init() {
+  const saved = settings.load();
   const opts = await invoke("startup_options");
+  persistForm = !(opts.server || opts.name || opts.room);
+  if (persistForm) {
+    for (const key of ["server", "name", "room"]) if (saved[key]) $(key).value = saved[key];
+    if (saved.pttKey) $("ptt-key").value = saved.pttKey;
+    if (saved.mode === "voiceActivation") opts.voiceActivation = true;
+  }
+  // The core registers the default key at startup; registering again from
+  // here applies a saved key and surfaces conflicts (e.g. a second instance).
+  $("ptt-set").click();
+  await loadAudioDevices(saved);
+
   if (opts.server) $("server").value = opts.server;
   if (opts.name) $("name").value = opts.name;
   if (opts.room) $("room").value = opts.room;
