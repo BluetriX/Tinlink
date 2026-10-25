@@ -191,6 +191,58 @@ pub async fn me(State(state): State<AppState>, user: AuthUser) -> AppResult<Json
     Ok(Json(info))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ChangePassword {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+/// Changes the password and signs out all other sessions.
+pub async fn change_password(
+    State(state): State<AppState>,
+    user: AuthUser,
+    headers: HeaderMap,
+    Json(req): Json<ChangePassword>,
+) -> AppResult<StatusCode> {
+    let key = user.name.to_ascii_lowercase();
+    if let Some(wait) = state.login_limiter.blocked_for(&key) {
+        return Err(AppError::TooManyRequests(wait.as_secs()));
+    }
+    if req.new_password.chars().count() < MIN_PASSWORD_LEN {
+        return Err(AppError::bad_request(format!(
+            "password must have at least {MIN_PASSWORD_LEN} characters"
+        )));
+    }
+    let stored: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id = $1")
+        .bind(user.id)
+        .fetch_one(&state.db)
+        .await?;
+    if !verify_password(req.current_password, stored).await? {
+        state.login_limiter.record_failure(&key);
+        return Err(AppError::bad_request("current password is wrong"));
+    }
+    let hash = hash_password(req.new_password).await?;
+    let current = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(hash_token)
+        .unwrap_or_default();
+    let mut tx = state.db.begin().await?;
+    sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
+        .bind(user.id)
+        .bind(hash)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND token_hash <> $2")
+        .bind(user.id)
+        .bind(current)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn create_session(state: &AppState, user_id: Uuid) -> AppResult<String> {
     let token = random_token()?;
     sqlx::query("INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, $3)")

@@ -21,6 +21,7 @@ pub fn router() -> Router<AppState> {
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
         .route("/users/me", get(auth::me))
+        .route("/users/me/password", put(auth::change_password))
         .route("/info", get(info))
         .route("/groups", get(groups::list_mine).post(groups::create))
         .route(
@@ -76,6 +77,7 @@ pub fn router() -> Router<AppState> {
             "/channels/{channel_id}/messages/{message_id}",
             patch(messages::edit).delete(messages::delete),
         )
+        .route("/channels/{channel_id}/read", put(messages::read))
         .route(
             "/channels/{channel_id}/attachments",
             // Size is enforced while streaming to disk (TINLINK_MAX_UPLOAD_MB).

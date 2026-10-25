@@ -127,6 +127,7 @@ serialized as flag names, e.g. `"VIEW_CHANNEL | SEND_MESSAGES"`.
 | --- | --- | --- |
 | POST | `/auth/register`, `/auth/login`, `/auth/logout` | Accounts and sessions |
 | GET | `/users/me` | Current user |
+| PUT | `/users/me/password` | Change password `{"current_password","new_password"}`, signs out other sessions |
 | GET, POST | `/groups` | My groups, create a group |
 | GET, PATCH, DELETE | `/groups/{id}` | Group details (incl. my permissions), settings, delete (owner) |
 | GET | `/groups/{id}/members` | Members with role ids |
@@ -142,6 +143,7 @@ serialized as flag names, e.g. `"VIEW_CHANNEL | SEND_MESSAGES"`.
 | PUT, DELETE | `/channels/{id}/overwrites/{role\|member}/{target}` | Set or remove an overwrite |
 | GET, POST | `/channels/{id}/messages` | Chat history (`?before=&limit=`), send |
 | PATCH, DELETE | `/channels/{id}/messages/{msg}` | Edit (author), delete |
+| PUT | `/channels/{id}/read` | Mark read up to `{"message_id"}` (never moves back) |
 | POST | `/channels/{id}/attachments` | Upload a file (multipart field `file`), then send its id in `attachment_ids` |
 | GET | `/files/{id}?exp=&sig=` | Download via the signed URL included in messages |
 | GET | `/info` | Server version and source code URL |
@@ -174,6 +176,12 @@ Uploaded files are stored in `TINLINK_FILES_DIR` (default `/data/files`, limit
 `TINLINK_MAX_UPLOAD_MB`, default 25). Messages carry signed download URLs valid for
 about a day; images and a few media types are shown inline, everything else is
 served as a download. Uploads never attached to a message are removed after an hour.
+
+Messages carry `mentions`: the ids of group members mentioned with `@name` who can
+see the channel (recomputed on edit). The channel list includes the caller's read
+state per channel: `last_message_id`, `last_read_id` and `mention_count` (unread
+mentions). A channel is unread when `last_message_id` is greater than
+`last_read_id`; your own messages count as read.
 
 Rules worth knowing:
 

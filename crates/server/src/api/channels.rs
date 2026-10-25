@@ -41,6 +41,19 @@ pub struct ChannelInfo {
     pub channel: ChannelRow,
     /// The caller's effective permissions in this channel.
     pub permissions: Permissions,
+    /// Only in the channel list; channel events go to many users.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    pub read_state: Option<ReadState>,
+}
+
+/// The caller's read position in a channel. The channel has unread messages
+/// when `last_message_id` is greater than `last_read_id` (or nothing was read).
+#[derive(Debug, Serialize)]
+pub struct ReadState {
+    pub last_message_id: Option<Uuid>,
+    pub last_read_id: Option<Uuid>,
+    /// Unread messages that mention the caller.
+    pub mention_count: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -93,10 +106,34 @@ pub async fn list(
             channels.push(ChannelInfo {
                 channel,
                 permissions,
+                read_state: None,
             });
         }
     }
     let visible: Vec<Uuid> = channels.iter().map(|c| c.channel.id).collect();
+    let read_states: Vec<(Uuid, Option<Uuid>, Option<Uuid>, i64)> = sqlx::query_as(
+        "SELECT c.id,
+                (SELECT m.id FROM messages m WHERE m.channel_id = c.id ORDER BY m.id DESC LIMIT 1),
+                r.last_read_id,
+                (SELECT count(*) FROM message_mentions mm JOIN messages m ON m.id = mm.message_id
+                 WHERE mm.user_id = $2 AND m.channel_id = c.id
+                   AND (r.last_read_id IS NULL OR m.id > r.last_read_id))
+         FROM unnest($1::uuid[]) AS c(id)
+         LEFT JOIN read_states r ON r.channel_id = c.id AND r.user_id = $2",
+    )
+    .bind(&visible)
+    .bind(user.id)
+    .fetch_all(&state.db)
+    .await?;
+    for (id, last_message_id, last_read_id, mention_count) in read_states {
+        if let Some(c) = channels.iter_mut().find(|c| c.channel.id == id) {
+            c.read_state = Some(ReadState {
+                last_message_id,
+                last_read_id,
+                mention_count,
+            });
+        }
+    }
     let voice = sqlx::query_as(
         "SELECT channel_id, user_id FROM voice_participants WHERE channel_id = ANY($1) ORDER BY joined_at",
     )
@@ -259,6 +296,7 @@ pub async fn create(
         Json(ChannelInfo {
             channel,
             permissions,
+            read_state: None,
         }),
     ))
 }
@@ -302,6 +340,7 @@ pub async fn update(
     Ok(Json(ChannelInfo {
         channel,
         permissions: perms,
+        read_state: None,
     }))
 }
 
