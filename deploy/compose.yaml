@@ -1,0 +1,76 @@
+# Tinlink self-hosting stack.
+# Usage: cp .env.example .env, edit it, then `docker compose up -d` in this directory.
+name: tinlink
+
+services:
+  caddy:
+    image: caddy:2.11
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      TINLINK_DOMAIN: ${TINLINK_DOMAIN}
+      LIVEKIT_DOMAIN: ${LIVEKIT_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - server
+      - livekit
+
+  server:
+    build:
+      context: ..
+    restart: unless-stopped
+    environment:
+      TINLINK_DOMAIN: ${TINLINK_DOMAIN}
+      LIVEKIT_PUBLIC_URL: ${LIVEKIT_PUBLIC_URL}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      DATABASE_URL: postgres://tinlink:${POSTGRES_PASSWORD}@postgres:5432/tinlink
+      TINLINK_DEV_INSECURE_TOKENS: ${TINLINK_DEV_INSECURE_TOKENS:-false}
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - files:/data/files
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tinlink
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: tinlink
+    volumes:
+      - pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tinlink"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  livekit:
+    image: livekit/livekit-server:v1.13
+    restart: unless-stopped
+    command: ["--config", "/etc/livekit.yaml"]
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+    ports:
+      # Signaling for local development; in production it goes through Caddy.
+      - "127.0.0.1:7880:7880"
+      # Media must reach LiveKit directly, never through the reverse proxy.
+      - "7881:7881/tcp"
+      - "50000-50100:50000-50100/udp"
+
+volumes:
+  caddy_data:
+  caddy_config:
+  files:
+  pg:

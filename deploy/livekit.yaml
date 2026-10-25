@@ -1,0 +1,19 @@
+# LiveKit SFU configuration. API keys come from LIVEKIT_KEYS (see compose.yaml).
+# Reference: https://docs.livekit.io/home/self-hosting/deployment/
+port: 7880
+log_level: info
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 50100
+  # Discover the public IP via STUN so remote clients can connect.
+  use_external_ip: true
+room:
+  empty_timeout: 300
+  # Opus with DTX keeps silent participants nearly free.
+  enabled_codecs:
+    - mime: audio/opus
+    - mime: video/vp9
+    - mime: video/av1
+    - mime: video/h264
+    - mime: video/vp8
