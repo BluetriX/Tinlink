@@ -14,6 +14,23 @@ env:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: tinlink
+          POSTGRES_PASSWORD: tinlink
+          POSTGRES_DB: tinlink
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tinlink"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      # Integration tests create one database per test on this server.
+      DATABASE_URL: postgres://tinlink:tinlink@localhost:5432/tinlink
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

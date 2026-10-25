@@ -45,8 +45,17 @@ deploy/           docker compose stack (Caddy, server, PostgreSQL, LiveKit)
 Requirements: Rust (stable), Docker.
 
 ```sh
-cargo test
+cargo test        # integration tests need DATABASE_URL, see below
 cargo clippy --all-targets
+```
+
+The server's integration tests run against a real PostgreSQL and create a fresh
+database per test, so the user needs the `CREATEDB` privilege:
+
+```sh
+docker run -d --name tinlink-pg -p 5432:5432 -e POSTGRES_USER=tinlink \
+  -e POSTGRES_PASSWORD=tinlink postgres:17
+DATABASE_URL=postgres://tinlink:tinlink@localhost/tinlink cargo test
 ```
 
 These cover the server crates (the default workspace members). The desktop app
@@ -76,6 +85,46 @@ curl -k -X POST https://localhost/api/voice/token \
   -H 'content-type: application/json' \
   -d '{"name":"erik","room":"lobby"}'
 ```
+
+## Server API
+
+All endpoints live under `/api` and use JSON. Authenticated endpoints expect
+`Authorization: Bearer <token>` from register or login. Permissions are
+serialized as flag names, e.g. `"VIEW_CHANNEL | SEND_MESSAGES"`.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| POST | `/auth/register`, `/auth/login`, `/auth/logout` | Accounts and sessions |
+| GET | `/users/me` | Current user |
+| GET, POST | `/groups` | My groups, create a group |
+| GET, PATCH, DELETE | `/groups/{id}` | Group details (incl. my permissions), settings, delete (owner) |
+| GET | `/groups/{id}/members` | Members with role ids |
+| DELETE | `/groups/{id}/members/{user}` | Leave or kick |
+| PUT, DELETE | `/groups/{id}/members/{user}/roles/{role}` | Assign or remove a role |
+| POST | `/groups/{id}/invites`, `/invites/{code}/join` | Invites |
+| GET, POST | `/groups/{id}/roles` | Roles |
+| PATCH, DELETE | `/groups/{id}/roles/{role}` | Edit or delete a role |
+| POST | `/groups/{id}/categories` | Create a category |
+| GET, POST | `/groups/{id}/channels` | Visible channels with my permissions, create a channel |
+| PATCH, DELETE | `/channels/{id}` | Edit or delete a channel |
+| GET | `/channels/{id}/overwrites` | Permission overwrites |
+| PUT, DELETE | `/channels/{id}/overwrites/{role\|member}/{target}` | Set or remove an overwrite |
+| GET, POST | `/channels/{id}/messages` | Chat history (`?before=&limit=`), send |
+| PATCH, DELETE | `/channels/{id}/messages/{msg}` | Edit (author), delete |
+| POST | `/channels/{id}/voice-token` | LiveKit token for the channel's voice room |
+| POST | `/voice/token` | Unauthenticated dev token (only with `TINLINK_DEV_INSECURE_TOKENS=true`) |
+
+Rules worth knowing:
+
+- The group owner has all permissions. Each group has an `@everyone` role whose id
+  equals the group id.
+- Roles have a position; members can only manage roles below their highest role and
+  only grant permissions they hold.
+- Members with `CREATE_OWN_CHANNELS` can create channels in categories with
+  `allow_user_channels` (a new group has a "Rooms" category), up to
+  `user_channel_limit` per member, and get moderation rights in their channels.
+- Registration is open by default; set `TINLINK_OPEN_REGISTRATION=false` to allow
+  only the first account.
 
 ## Desktop client
 
@@ -120,8 +169,8 @@ plays the other's microphone back into the shared microphone.
 ## Roadmap
 
 1. Media prototype: Windows desktop client joins a room, push-to-talk, screen sharing; measure latency
-2. Core server: accounts, groups, channels, chat over WebSocket
-3. Permissions: roles, overwrites, user-created channels with limits, moderation
+2. Core server: accounts, groups, channels, chat (REST done), live events over WebSocket
+3. Permissions: roles, overwrites, user-created channels with limits (done), moderation in voice
 4. Files and polish: uploads, previews, mentions, web client
 5. Optional: end-to-end encryption, mobile, federation
 
