@@ -23,6 +23,8 @@ pub enum EventKind {
     ChannelCreated,
     ChannelUpdated,
     ChannelDeleted,
+    VoiceJoined,
+    VoiceLeft,
     MemberJoined,
     MemberLeft,
     /// Roles, overwrites, categories or group settings changed; clients

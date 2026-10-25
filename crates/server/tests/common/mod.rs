@@ -17,6 +17,7 @@ pub const LIVEKIT_SECRET: &str = "test-secret-that-is-at-least-32-bytes";
 
 pub struct TestApp {
     router: Router,
+    pub state: AppState,
 }
 
 impl TestApp {
@@ -63,7 +64,8 @@ impl TestApp {
             events: Default::default(),
         };
         Self {
-            router: router(state),
+            router: router(state.clone()),
+            state,
         }
     }
 

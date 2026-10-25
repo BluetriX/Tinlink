@@ -1,4 +1,5 @@
-# LiveKit SFU configuration. API keys come from LIVEKIT_KEYS (see compose.yaml).
+# LiveKit SFU configuration. API keys come from LIVEKIT_KEYS and the webhook
+# signing key from LIVEKIT_WEBHOOK_API_KEY (see compose.yaml).
 # Reference: https://docs.livekit.io/home/self-hosting/deployment/
 port: 7880
 log_level: info
@@ -18,3 +19,7 @@ room:
     - mime: video/av1
     - mime: video/h264
     - mime: video/vp8
+# Voice presence and cleanup of temporary channels in the Tinlink server.
+webhook:
+  urls:
+    - http://server:8080/api/livekit/webhook

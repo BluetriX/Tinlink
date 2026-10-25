@@ -47,6 +47,14 @@ pub struct ChannelInfo {
 pub struct ChannelList {
     pub categories: Vec<CategoryInfo>,
     pub channels: Vec<ChannelInfo>,
+    /// Who is connected to which voice channel (visible channels only).
+    pub voice: Vec<VoiceParticipant>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct VoiceParticipant {
+    pub channel_id: Uuid,
+    pub user_id: Uuid,
 }
 
 macro_rules! channel_columns {
@@ -88,9 +96,17 @@ pub async fn list(
             });
         }
     }
+    let visible: Vec<Uuid> = channels.iter().map(|c| c.channel.id).collect();
+    let voice = sqlx::query_as(
+        "SELECT channel_id, user_id FROM voice_participants WHERE channel_id = ANY($1) ORDER BY joined_at",
+    )
+    .bind(&visible)
+    .fetch_all(&state.db)
+    .await?;
     Ok(Json(ChannelList {
         categories,
         channels,
+        voice,
     }))
 }
 

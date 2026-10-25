@@ -120,6 +120,11 @@ Live updates come over a WebSocket at `/api/gateway`. The client first sends
 channels and permissions). Events are filtered by the receiver's permissions. On
 `{"type":"resync"}` the client fell behind and should reload its state.
 
+LiveKit reports joins and leaves via webhooks (`/api/livekit/webhook`, signed with
+the API secret). The channel list includes who is in which voice channel, and
+gateway events `voice_joined` / `voice_left` keep clients current. Temporary
+channels are deleted when their room finishes, or after 10 minutes if nobody joined.
+
 Rules worth knowing:
 
 - The group owner has all permissions. Each group has an `@everyone` role whose id

@@ -9,6 +9,7 @@ pub mod events;
 mod gateway;
 pub mod livekit;
 pub mod state;
+pub mod tasks;
 
 use axum::Router;
 use axum::routing::get;

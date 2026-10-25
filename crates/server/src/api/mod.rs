@@ -5,6 +5,7 @@ mod groups;
 mod messages;
 mod roles;
 mod voice;
+mod webhook;
 
 use axum::Router;
 use axum::routing::{delete, get, patch, post, put};
@@ -77,4 +78,5 @@ pub fn router() -> Router<AppState> {
             post(voice::channel_token),
         )
         .route("/voice/token", post(voice::dev_token))
+        .route("/livekit/webhook", post(webhook::receive))
 }

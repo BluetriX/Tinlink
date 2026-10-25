@@ -61,6 +61,7 @@ services:
     command: ["--config", "/etc/livekit.yaml"]
     environment:
       LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+      LIVEKIT_WEBHOOK_API_KEY: ${LIVEKIT_API_KEY}
       # IP announced to clients for media; empty means auto-detect.
       NODE_IP: ${LIVEKIT_NODE_IP:-}
     volumes:
