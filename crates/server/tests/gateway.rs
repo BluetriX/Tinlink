@@ -56,6 +56,32 @@ async fn rejects_invalid_token(db: PgPool) {
 }
 
 #[sqlx::test(migrator = "tinlink_server::MIGRATOR")]
+async fn owner_receives_events_of_group_created_while_connected(db: PgPool) {
+    let app = TestApp::new(db);
+    let addr = app.spawn().await;
+    let (owner, _) = app.register("owner").await;
+    let mut ws = connect(addr, &owner).await;
+
+    let group = app.create_group(&owner, "G").await;
+    let joined = next_json(&mut ws)
+        .await
+        .expect("member_joined for the owner");
+    assert_eq!(joined["type"], "member_joined");
+    assert_eq!(joined["group_id"], group.as_str());
+
+    let general = app.channel_id(&owner, &group, "general").await.unwrap();
+    app.post(
+        &format!("/api/channels/{general}/messages"),
+        &owner,
+        json!({"content": "hello"}),
+    )
+    .await;
+    let event = next_json(&mut ws).await.expect("message_created");
+    assert_eq!(event["type"], "message_created");
+    assert_eq!(event["data"]["content"], "hello");
+}
+
+#[sqlx::test(migrator = "tinlink_server::MIGRATOR")]
 async fn delivers_events_only_to_users_with_access(db: PgPool) {
     let app = TestApp::new(db);
     let addr = app.spawn().await;

@@ -83,6 +83,10 @@ pub async fn create(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
+    // Lets the owner's open gateway connections deliver this group's events.
+    state
+        .events
+        .member(EventKind::MemberJoined, group_id, user.id);
 
     Ok((StatusCode::CREATED, Json(group)))
 }
