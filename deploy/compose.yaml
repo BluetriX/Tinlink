@@ -33,6 +33,7 @@ services:
       DATABASE_URL: postgres://tinlink:${POSTGRES_PASSWORD}@postgres:5432/tinlink
       TINLINK_DEV_INSECURE_TOKENS: ${TINLINK_DEV_INSECURE_TOKENS:-false}
       TINLINK_OPEN_REGISTRATION: ${TINLINK_OPEN_REGISTRATION:-true}
+      TINLINK_MAX_UPLOAD_MB: ${TINLINK_MAX_UPLOAD_MB:-25}
       RUST_LOG: ${RUST_LOG:-info}
     volumes:
       - files:/data/files

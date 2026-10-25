@@ -1,5 +1,6 @@
 //! HTTP API routes.
 
+mod attachments;
 mod channels;
 mod groups;
 mod messages;
@@ -8,6 +9,7 @@ mod voice;
 mod webhook;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, patch, post, put};
 
 use crate::auth;
@@ -19,6 +21,7 @@ pub fn router() -> Router<AppState> {
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
         .route("/users/me", get(auth::me))
+        .route("/info", get(info))
         .route("/groups", get(groups::list_mine).post(groups::create))
         .route(
             "/groups/{group_id}",
@@ -74,9 +77,30 @@ pub fn router() -> Router<AppState> {
             patch(messages::edit).delete(messages::delete),
         )
         .route(
+            "/channels/{channel_id}/attachments",
+            // Size is enforced while streaming to disk (TINLINK_MAX_UPLOAD_MB).
+            post(attachments::upload).layer(DefaultBodyLimit::disable()),
+        )
+        .route("/files/{id}", get(attachments::download))
+        .route(
             "/channels/{channel_id}/voice-token",
             post(voice::channel_token),
         )
         .route("/voice/token", post(voice::dev_token))
         .route("/livekit/webhook", post(webhook::receive))
+}
+
+/// Public server information, including where to get the source code
+/// (required by the AGPL for network use).
+async fn info(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({
+        "name": "Tinlink",
+        "version": env!("CARGO_PKG_VERSION"),
+        "domain": state.config.domain,
+        "source_url": state.config.source_url,
+        "open_registration": state.config.open_registration,
+        "max_upload_bytes": state.config.max_upload_bytes,
+    }))
 }

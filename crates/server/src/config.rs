@@ -1,6 +1,7 @@
 //! Server configuration, read from environment variables.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
@@ -15,6 +16,11 @@ pub struct Config {
     pub livekit: LiveKitConfig,
     /// Issue voice tokens without authentication. Development only.
     pub dev_insecure_tokens: bool,
+    /// Directory for uploaded files.
+    pub files_dir: PathBuf,
+    pub max_upload_bytes: usize,
+    /// Where users can get the source code of this server (AGPL section 13).
+    pub source_url: String,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +48,18 @@ impl Config {
             },
             dev_insecure_tokens: optional("TINLINK_DEV_INSECURE_TOKENS")
                 .is_some_and(|v| v == "true"),
+            files_dir: optional("TINLINK_FILES_DIR")
+                .unwrap_or_else(|| "/data/files".into())
+                .into(),
+            max_upload_bytes: optional("TINLINK_MAX_UPLOAD_MB")
+                .map(|v| v.parse::<usize>())
+                .transpose()
+                .context("TINLINK_MAX_UPLOAD_MB must be a number")?
+                .unwrap_or(25)
+                * 1024
+                * 1024,
+            source_url: optional("TINLINK_SOURCE_URL")
+                .unwrap_or_else(|| env!("CARGO_PKG_REPOSITORY").into()),
         })
     }
 }

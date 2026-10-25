@@ -111,6 +111,9 @@ serialized as flag names, e.g. `"VIEW_CHANNEL | SEND_MESSAGES"`.
 | PUT, DELETE | `/channels/{id}/overwrites/{role\|member}/{target}` | Set or remove an overwrite |
 | GET, POST | `/channels/{id}/messages` | Chat history (`?before=&limit=`), send |
 | PATCH, DELETE | `/channels/{id}/messages/{msg}` | Edit (author), delete |
+| POST | `/channels/{id}/attachments` | Upload a file (multipart field `file`), then send its id in `attachment_ids` |
+| GET | `/files/{id}?exp=&sig=` | Download via the signed URL included in messages |
+| GET | `/info` | Server version and source code URL |
 | POST | `/channels/{id}/voice-token` | LiveKit token for the channel's voice room |
 | POST | `/voice/token` | Unauthenticated dev token (only with `TINLINK_DEV_INSECURE_TOKENS=true`) |
 
@@ -124,6 +127,11 @@ LiveKit reports joins and leaves via webhooks (`/api/livekit/webhook`, signed wi
 the API secret). The channel list includes who is in which voice channel, and
 gateway events `voice_joined` / `voice_left` keep clients current. Temporary
 channels are deleted when their room finishes, or after 10 minutes if nobody joined.
+
+Uploaded files are stored in `TINLINK_FILES_DIR` (default `/data/files`, limit
+`TINLINK_MAX_UPLOAD_MB`, default 25). Messages carry signed download URLs valid for
+about a day; images and a few media types are shown inline, everything else is
+served as a download. Uploads never attached to a message are removed after an hour.
 
 Rules worth knowing:
 
@@ -184,7 +192,7 @@ plays the other's microphone back into the shared microphone.
 1. Media prototype: Windows desktop client joins a room, push-to-talk, screen sharing; measure latency
 2. Core server: accounts, groups, channels, chat, live events over WebSocket (done)
 3. Permissions: roles, overwrites, user-created channels with limits (done), moderation in voice
-4. Files and polish: uploads, previews, mentions, web client
+4. Files and polish: uploads (done), previews, mentions, web client
 5. Optional: end-to-end encryption, mobile, federation
 
 ## License

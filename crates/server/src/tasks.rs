@@ -6,27 +6,38 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::events::EventKind;
+use crate::files;
 use crate::state::AppState;
 
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 /// Temporary channels nobody joined are removed after this age. Channels
 /// that were used are removed by the `room_finished` webhook instead.
 pub const UNUSED_TEMPORARY_CHANNEL_AGE: Duration = Duration::from_secs(10 * 60);
+/// Uploads not linked to a message (or whose message was deleted) are
+/// removed after this age.
+pub const ORPHAN_ATTACHMENT_AGE: Duration = Duration::from_secs(60 * 60);
 
 pub fn spawn(state: AppState) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(SWEEP_INTERVAL);
         loop {
             interval.tick().await;
-            if let Err(err) = sweep(&state, UNUSED_TEMPORARY_CHANNEL_AGE).await {
+            if let Err(err) =
+                sweep(&state, UNUSED_TEMPORARY_CHANNEL_AGE, ORPHAN_ATTACHMENT_AGE).await
+            {
                 tracing::warn!(error = ?err, "maintenance sweep failed");
             }
         }
     });
 }
 
-/// Deletes expired sessions and empty temporary channels older than `min_age`.
-pub async fn sweep(state: &AppState, min_age: Duration) -> anyhow::Result<()> {
+/// Deletes expired sessions, empty temporary channels older than
+/// `channel_age` and orphaned uploads older than `attachment_age`.
+pub async fn sweep(
+    state: &AppState,
+    channel_age: Duration,
+    attachment_age: Duration,
+) -> anyhow::Result<()> {
     sqlx::query("DELETE FROM sessions WHERE expires_at < now()")
         .execute(&state.db)
         .await?;
@@ -36,7 +47,7 @@ pub async fn sweep(state: &AppState, min_age: Duration) -> anyhow::Result<()> {
            AND NOT EXISTS (SELECT 1 FROM voice_participants v WHERE v.channel_id = c.id)
          RETURNING c.id, c.group_id",
     )
-    .bind(min_age.as_secs_f64())
+    .bind(channel_age.as_secs_f64())
     .fetch_all(&state.db)
     .await?;
     for (channel_id, group_id) in deleted {
@@ -46,5 +57,22 @@ pub async fn sweep(state: &AppState, min_age: Duration) -> anyhow::Result<()> {
             json!({ "id": channel_id }),
         );
     }
+
+    let orphans: Vec<Uuid> = sqlx::query_scalar(
+        "DELETE FROM attachments WHERE message_id IS NULL
+           AND created_at < now() - make_interval(secs => $1)
+         RETURNING id",
+    )
+    .bind(attachment_age.as_secs_f64())
+    .fetch_all(&state.db)
+    .await?;
+    for id in orphans {
+        if let Err(err) = tokio::fs::remove_file(files::path(state, id)).await
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%id, error = %err, "cannot remove orphaned upload");
+        }
+    }
+    files::remove_unreferenced(state, attachment_age).await?;
     Ok(())
 }

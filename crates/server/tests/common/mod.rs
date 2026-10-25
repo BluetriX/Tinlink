@@ -49,6 +49,9 @@ pub fn config() -> Config {
             api_secret: LIVEKIT_SECRET.into(),
         },
         dev_insecure_tokens: false,
+        files_dir: std::env::temp_dir().join(format!("tinlink-test-{}", uuid::Uuid::now_v7())),
+        max_upload_bytes: 1024 * 1024,
+        source_url: "https://example.org/tinlink".into(),
     }
 }
 
@@ -97,6 +100,47 @@ impl TestApp {
                 .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&bytes).into()))
         };
         Response { status, body }
+    }
+
+    /// Sends a raw request and returns status, headers and body bytes.
+    pub async fn raw(&self, req: Request<Body>) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+        let res = self.router.clone().oneshot(req).await.unwrap();
+        let (parts, body) = res.into_parts();
+        let bytes = body.collect().await.unwrap().to_bytes().to_vec();
+        (parts.status, parts.headers, bytes)
+    }
+
+    /// Uploads a file to a channel as multipart form data.
+    pub async fn upload(
+        &self,
+        channel: &str,
+        token: &str,
+        filename: &str,
+        content_type: &str,
+        data: &[u8],
+    ) -> Response {
+        let boundary = "tinlink-test-boundary";
+        let mut body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: {content_type}\r\n\r\n"
+        )
+        .into_bytes();
+        body.extend_from_slice(data);
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/channels/{channel}/attachments"))
+            .header("authorization", format!("Bearer {token}"))
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(Body::from(body))
+            .unwrap();
+        let (status, _, bytes) = self.raw(req).await;
+        Response {
+            status,
+            body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        }
     }
 
     pub async fn get(&self, path: &str, token: &str) -> Response {

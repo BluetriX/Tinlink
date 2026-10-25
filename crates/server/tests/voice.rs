@@ -177,11 +177,15 @@ async fn temporary_channels_are_removed_when_empty(db: PgPool) {
     assert!(app.channel_id(&owner, &group, "general").await.is_some());
 
     // The never-used room is swept once it is old enough.
-    tinlink_server::tasks::sweep(&app.state, Duration::from_secs(3600))
-        .await
-        .unwrap();
+    tinlink_server::tasks::sweep(
+        &app.state,
+        Duration::from_secs(3600),
+        Duration::from_secs(3600),
+    )
+    .await
+    .unwrap();
     assert!(app.channel_id(&owner, &group, "unused").await.is_some());
-    tinlink_server::tasks::sweep(&app.state, Duration::ZERO)
+    tinlink_server::tasks::sweep(&app.state, Duration::ZERO, Duration::from_secs(3600))
         .await
         .unwrap();
     assert!(app.channel_id(&owner, &group, &unused).await.is_none());

@@ -17,11 +17,12 @@ license = "AGPL-3.0-only"
 tinlink-protocol = { path = "crates/protocol" }
 anyhow = "1"
 argon2 = "0.6"
-axum = { version = "0.8", features = ["ws"] }
+axum = { version = "0.8", features = ["ws", "multipart"] }
 futures-util = "0.3"
 bitflags = { version = "2", features = ["serde"] }
 getrandom = "0.4"
 http-body-util = "0.1"
+mime = "0.3"
 base64 = "0.23"
 hmac = "0.13"
 sha2 = "0.11"

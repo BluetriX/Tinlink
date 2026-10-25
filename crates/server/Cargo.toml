@@ -16,6 +16,7 @@ base64.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 hmac.workspace = true
+mime.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
 serde.workspace = true

@@ -6,6 +6,7 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod events;
+pub mod files;
 mod gateway;
 pub mod livekit;
 pub mod state;
