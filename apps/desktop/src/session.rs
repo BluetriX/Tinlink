@@ -42,6 +42,16 @@ struct TokenResponse {
     identity: String,
 }
 
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenResponse")
+            .field("url", &self.url)
+            .field("token", &"<redacted>")
+            .field("identity", &self.identity)
+            .finish()
+    }
+}
+
 /// Fetches a LiveKit token from the Tinlink server's development endpoint.
 async fn fetch_token(server: &str, name: &str, room: &str) -> Result<TokenResponse> {
     let client = reqwest::Client::builder()
@@ -326,4 +336,77 @@ async fn collect_stats(
         .collect();
     tracing::trace!(stats = ?fresh, "link stats");
     *out = fresh;
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::Json;
+    use axum::http::StatusCode;
+    use axum::routing::post;
+    use serde_json::{Value, json};
+
+    use super::fetch_token;
+
+    /// Serves `router` on a random local port and returns its base URL.
+    async fn serve(router: axum::Router) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn fetches_token_from_dev_endpoint() {
+        let router = axum::Router::new().route(
+            "/api/voice/token",
+            post(|Json(req): Json<Value>| async move {
+                Json(json!({
+                    "url": "ws://localhost:7880",
+                    "token": format!("token-for-{}-in-{}", req["name"].as_str().unwrap(), req["room"].as_str().unwrap()),
+                    "identity": "bob@localhost",
+                    "room": "lobby",
+                }))
+            }),
+        );
+        let base = serve(router).await;
+
+        // A trailing slash on the server URL must not break the path.
+        let token = fetch_token(&format!("{base}/"), "bob", "lobby")
+            .await
+            .unwrap();
+        assert_eq!(token.url, "ws://localhost:7880");
+        assert_eq!(token.token, "token-for-bob-in-lobby");
+        assert_eq!(token.identity, "bob@localhost");
+    }
+
+    #[tokio::test]
+    async fn reports_server_errors() {
+        let router = axum::Router::new().route(
+            "/api/voice/token",
+            post(|| async {
+                (
+                    StatusCode::FORBIDDEN,
+                    "authentication is not implemented yet",
+                )
+            }),
+        );
+        let base = serve(router).await;
+
+        let err = fetch_token(&base, "bob", "lobby").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("403"), "{msg}");
+        assert!(
+            msg.contains("authentication is not implemented yet"),
+            "{msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reports_unreachable_server() {
+        // Port 9 (discard) is not served on the test machine.
+        let err = fetch_token("http://127.0.0.1:9", "bob", "lobby")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("cannot reach"), "{err}");
+    }
 }

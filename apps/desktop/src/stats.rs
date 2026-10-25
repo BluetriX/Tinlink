@@ -124,7 +124,89 @@ fn loss_pct(lost: i64, received: u64) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    use livekit::webrtc::stats::{CandidatePairStats, InboundRtpStats, RemoteInboundRtpStats};
+
     use super::*;
+
+    fn candidate_pair(nominated: bool, rtt_s: f64) -> RtcStats {
+        let mut p = CandidatePairStats::default();
+        p.candidate_pair.nominated = nominated;
+        p.candidate_pair.current_round_trip_time = rtt_s;
+        RtcStats::CandidatePair(p)
+    }
+
+    fn inbound_rtp(kind: &str) -> InboundRtpStats {
+        let mut rtp = InboundRtpStats::default();
+        rtp.stream.kind = kind.into();
+        rtp.received.jitter = 0.002;
+        rtp.received.packets_received = 990;
+        rtp.received.packets_lost = 10;
+        rtp
+    }
+
+    #[test]
+    fn summarises_inbound_audio() {
+        let mut rtp = inbound_rtp("audio");
+        rtp.inbound.jitter_buffer_delay = 2.0;
+        rtp.inbound.jitter_buffer_emitted_count = 100;
+        let stats = [
+            candidate_pair(false, 0.5),
+            candidate_pair(true, 0.012),
+            RtcStats::InboundRtp(rtp),
+        ];
+        let s = inbound(&stats);
+        assert_eq!(s.rtt_ms, Some(12.0));
+        assert_eq!(s.jitter_ms, Some(2.0));
+        assert_eq!(s.loss_pct, Some(1.0));
+        assert_eq!(s.jitter_buffer_ms, Some(20.0));
+        assert_eq!(s.video_size, None);
+    }
+
+    #[test]
+    fn summarises_inbound_video_and_merges_with_audio() {
+        let mut rtp = inbound_rtp("video");
+        rtp.inbound.frames_per_second = 30.0;
+        rtp.inbound.frame_width = 1920;
+        rtp.inbound.frame_height = 1080;
+        rtp.inbound.frames_decoded = 300;
+        rtp.inbound.total_decode_time = 0.6;
+        let video = inbound(&[candidate_pair(true, 0.004), RtcStats::InboundRtp(rtp)]);
+        assert_eq!(video.video_size, Some((1920, 1080)));
+        assert_eq!(video.video_fps, Some(30.0));
+        assert_eq!(video.decode_ms, Some(2.0));
+
+        // Muted audio: no RTT of its own, so the video's is kept.
+        let audio = LinkStats::default();
+        let merged = audio.with_video(&video);
+        assert_eq!(merged.rtt_ms, Some(4.0));
+        assert_eq!(merged.video_size, Some((1920, 1080)));
+    }
+
+    #[test]
+    fn summarises_outbound_from_remote_report() {
+        let mut r = RemoteInboundRtpStats::default();
+        r.remote_inbound.round_trip_time = 0.025;
+        r.remote_inbound.round_trip_time_measurements = 3;
+        r.remote_inbound.fraction_lost = 0.05;
+        r.received.jitter = 0.003;
+        let s = outbound(&[candidate_pair(true, 0.001), RtcStats::RemoteInboundRtp(r)]);
+        // The RTCP measurement wins over the ICE consent check.
+        assert_eq!(s.rtt_ms, Some(25.0));
+        assert_eq!(s.jitter_ms, Some(3.0));
+        assert_eq!(s.loss_pct, Some(5.0));
+    }
+
+    #[test]
+    fn interval_average_uses_previous_sample() {
+        let mut rtp = inbound_rtp("audio");
+        rtp.inbound.jitter_buffer_delay = 2.0;
+        rtp.inbound.jitter_buffer_emitted_count = 100;
+        let first = inbound(&[RtcStats::InboundRtp(rtp.clone())]);
+        rtp.inbound.jitter_buffer_delay = 4.0;
+        rtp.inbound.jitter_buffer_emitted_count = 150;
+        let second = inbound(&[RtcStats::InboundRtp(rtp)]).since(Some(&first));
+        assert_eq!(second.jitter_buffer_ms, Some(40.0));
+    }
 
     #[test]
     fn loss_percentage() {

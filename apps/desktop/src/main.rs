@@ -211,3 +211,38 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::StartupOptions;
+
+    fn parse(args: &[&str]) -> StartupOptions {
+        StartupOptions::parse(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn parses_startup_options() {
+        let opts = parse(&[
+            "--server",
+            "http://example.org",
+            "--name",
+            "bob",
+            "--room",
+            "lobby",
+            "--voice-activation",
+            "--join",
+            "--share",
+        ]);
+        assert_eq!(opts.server.as_deref(), Some("http://example.org"));
+        assert_eq!(opts.name.as_deref(), Some("bob"));
+        assert_eq!(opts.room.as_deref(), Some("lobby"));
+        assert!(opts.voice_activation && opts.join && opts.share);
+    }
+
+    #[test]
+    fn ignores_unknown_and_incomplete_options() {
+        let opts = parse(&["--bogus", "--name"]);
+        assert_eq!(opts.name, None);
+        assert!(!opts.join);
+    }
+}

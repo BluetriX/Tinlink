@@ -93,3 +93,43 @@ impl Voice {
         inner.mic.is_some() && inner.transmitting()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn inner(mode: VoiceMode, ptt_down: bool) -> Inner {
+        Inner {
+            mode,
+            ptt_down,
+            mic: None,
+        }
+    }
+
+    #[test]
+    fn push_to_talk_transmits_only_while_held() {
+        assert!(!inner(VoiceMode::PushToTalk, false).transmitting());
+        assert!(inner(VoiceMode::PushToTalk, true).transmitting());
+    }
+
+    #[test]
+    fn voice_activation_always_transmits() {
+        assert!(inner(VoiceMode::VoiceActivation, false).transmitting());
+    }
+
+    #[test]
+    fn nothing_is_transmitted_without_a_microphone() {
+        let voice = Voice::default();
+        voice.set_mode(VoiceMode::VoiceActivation);
+        voice.set_ptt(true);
+        assert!(!voice.transmitting());
+    }
+
+    #[test]
+    fn mode_names_match_the_ui() {
+        let mode: VoiceMode = serde_json::from_str("\"pushToTalk\"").unwrap();
+        assert_eq!(mode, VoiceMode::PushToTalk);
+        let mode: VoiceMode = serde_json::from_str("\"voiceActivation\"").unwrap();
+        assert_eq!(mode, VoiceMode::VoiceActivation);
+    }
+}
