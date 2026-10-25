@@ -57,6 +57,9 @@ docker compose up -d --build
 curl -k https://localhost/health
 ```
 
+For a public server set `use_external_ip: true` in `deploy/livekit.yaml`,
+otherwise LiveKit only announces local addresses and remote clients cannot connect media.
+
 Request a development voice token (only with `TINLINK_DEV_INSECURE_TOKENS=true`):
 
 ```sh
