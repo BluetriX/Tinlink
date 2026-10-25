@@ -3,7 +3,35 @@
 Self-hosted voice, chat, screen sharing and file sharing for small communities.
 A Discord / TeamSpeak replacement with a focus on **low latency**.
 
-> Status: early development. Nothing is usable yet.
+> Status: early development, ready for first tests. The server and the Windows
+> desktop client work end to end: accounts, groups, chat, files, voice, screen
+> sharing and moderation. Expect rough edges and breaking changes.
+
+## Current state
+
+- **Server:** accounts, groups with roles and per-channel permissions, invites,
+  text chat with file uploads, live updates over WebSocket, voice presence,
+  user-created temporary rooms and voice moderation (server mute, disconnect,
+  move). Self-hosted with Docker Compose, see [docs/self-hosting.md](docs/self-hosting.md).
+- **Windows client:** a native app (one portable `.exe`) with chat, voice
+  (push-to-talk or voice activation) and screen sharing with GPU encoding.
+- **Latency** (measured on a local network): about 60–70 ms glass to glass for
+  screen sharing at 1440p60, 2.7 ms of it for hardware encoding on an RTX 3070;
+  audio roughly 60–90 ms mouth to ear.
+- **Not yet:** macOS, mobile and web clients, federation, end-to-end encryption,
+  installer and code signing, mentions and message search.
+
+## Quick start
+
+1. Run a server: follow [docs/self-hosting.md](docs/self-hosting.md) (a Linux host
+   with Docker, a DNS name, a few forwarded ports).
+2. Build the Windows client (requirements under [Desktop client](#desktop-client)):
+   `cargo build --release -p tinlink-desktop`. The result,
+   `target/release/tinlink-desktop.exe`, runs without installation and can be
+   passed on to others. It is not signed yet, so Windows SmartScreen asks once
+   ("More info" → "Run anyway").
+3. Start it, enter your server's domain and create an account. The first account
+   creates a group and invites others with the "Invite" button.
 
 ## Goals
 
@@ -21,8 +49,8 @@ A Discord / TeamSpeak replacement with a focus on **low latency**.
 | --- | --- |
 | Server (REST, WebSocket gateway, permissions) | Rust, axum, PostgreSQL |
 | Media (voice, screen sharing) | [LiveKit](https://livekit.io) SFU, WebRTC over UDP |
-| Desktop client (Windows first, then macOS) | Tauri 2, media in the Rust core via the LiveKit Rust SDK, UI in Leptos |
-| Web / mobile client (later) | Same Leptos UI in the browser |
+| Desktop client (Windows first, then macOS) | Tauri 2, media in the Rust core via the LiveKit Rust SDK, static HTML/JS UI |
+| Web / mobile client (later) | to be decided |
 | Reverse proxy, TLS | Caddy |
 
 The server decides who may do what and encodes it into a signed LiveKit token.
@@ -168,7 +196,12 @@ voice channel to server-mute, disconnect or move them; a moved client follows
 into the new channel by itself. In voice: push-to-talk or voice
 activation, speaking indicators, link statistics (RTT to the SFU, jitter,
 loss, jitter buffer delay), screen sharing, and a native window for every
-remote screen share.
+remote screen share. While sharing, the voice panel shows resolution, frame
+rate and encoder, and a blue frame marks the shared monitor (excluded from the
+capture, so viewers do not see it). If you talk for about 10 seconds while
+nothing is transmitted (push-to-talk not held, or server-muted), the app plays
+a quiet double beep and shows a hint, at most every 30 seconds; for this it
+only measures the microphone level locally.
 
 The login is kept in the app data directory; all HTTP and the gateway
 WebSocket run in the Rust core, the WebView never sees the token.
@@ -219,11 +252,12 @@ plays the other's microphone back into the shared microphone.
 
 ## Roadmap
 
-1. Media prototype: Windows desktop client joins a room, push-to-talk, screen sharing; measure latency
+1. Media prototype: Windows desktop client joins a room, push-to-talk, screen sharing; measure latency (done)
 2. Core server: accounts, groups, channels, chat, live events over WebSocket (done)
 3. Permissions: roles, overwrites, user-created channels with limits, voice moderation (done)
-4. Files and polish: uploads (done), previews, mentions, web client
-5. Optional: end-to-end encryption, mobile, federation
+4. Files and polish: uploads and image previews (done), Windows client for the server (done), mentions, installer
+5. More platforms: macOS, then web and mobile
+6. Optional: end-to-end encryption, federation
 
 ## License
 
