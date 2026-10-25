@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::access::{Member, to_db};
 use crate::auth::{AuthUser, random_token};
 use crate::error::{AppError, AppResult};
+use crate::events::EventKind;
 use crate::state::AppState;
 
 const MAX_NAME_LEN: usize = 100;
@@ -156,6 +157,9 @@ pub async fn update(
     .bind(req.user_channel_limit)
     .fetch_one(&state.db)
     .await?;
+    state
+        .events
+        .group(EventKind::GroupUpdated, group_id, &group);
     Ok(Json(group))
 }
 
@@ -172,6 +176,7 @@ pub async fn delete(
         .bind(group_id)
         .execute(&state.db)
         .await?;
+    state.events.group(EventKind::GroupDeleted, group_id, ());
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -225,6 +230,7 @@ pub async fn remove_member(
         .bind(target)
         .execute(&state.db)
         .await?;
+    state.events.member(EventKind::MemberLeft, group_id, target);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -317,5 +323,10 @@ pub async fn join(
             .fetch_one(&mut *tx)
             .await?;
     tx.commit().await?;
+    if !already_member {
+        state
+            .events
+            .member(EventKind::MemberJoined, group_id, user.id);
+    }
     Ok(Json(group))
 }

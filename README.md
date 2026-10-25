@@ -114,6 +114,12 @@ serialized as flag names, e.g. `"VIEW_CHANNEL | SEND_MESSAGES"`.
 | POST | `/channels/{id}/voice-token` | LiveKit token for the channel's voice room |
 | POST | `/voice/token` | Unauthenticated dev token (only with `TINLINK_DEV_INSECURE_TOKENS=true`) |
 
+Live updates come over a WebSocket at `/api/gateway`. The client first sends
+`{"type":"auth","token":"..."}` and receives `{"type":"ready"}`, then events such as
+`message_created`, `channel_updated`, `member_joined` or `group_updated` (refetch
+channels and permissions). Events are filtered by the receiver's permissions. On
+`{"type":"resync"}` the client fell behind and should reload its state.
+
 Rules worth knowing:
 
 - The group owner has all permissions. Each group has an `@everyone` role whose id
@@ -171,7 +177,7 @@ plays the other's microphone back into the shared microphone.
 ## Roadmap
 
 1. Media prototype: Windows desktop client joins a room, push-to-talk, screen sharing; measure latency
-2. Core server: accounts, groups, channels, chat (REST done), live events over WebSocket
+2. Core server: accounts, groups, channels, chat, live events over WebSocket (done)
 3. Permissions: roles, overwrites, user-created channels with limits (done), moderation in voice
 4. Files and polish: uploads, previews, mentions, web client
 5. Optional: end-to-end encryption, mobile, federation

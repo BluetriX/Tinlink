@@ -13,6 +13,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 use tinlink_protocol::UserId;
 use uuid::Uuid;
@@ -43,16 +44,22 @@ impl FromRequestParts<AppState> for AuthUser {
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
             .ok_or(AppError::Unauthorized)?;
-        let row: Option<(Uuid, String)> = sqlx::query_as(
-            "SELECT u.id, u.name FROM sessions s JOIN users u ON u.id = s.user_id
-             WHERE s.token_hash = $1 AND s.expires_at > now()",
-        )
-        .bind(hash_token(token))
-        .fetch_optional(&state.db)
-        .await?;
-        let (id, name) = row.ok_or(AppError::Unauthorized)?;
-        Ok(Self { id, name })
+        authenticate(&state.db, token)
+            .await?
+            .ok_or(AppError::Unauthorized)
     }
+}
+
+/// Resolves a session token to its user, if the session is valid.
+pub async fn authenticate(db: &PgPool, token: &str) -> AppResult<Option<AuthUser>> {
+    let row: Option<(Uuid, String)> = sqlx::query_as(
+        "SELECT u.id, u.name FROM sessions s JOIN users u ON u.id = s.user_id
+         WHERE s.token_hash = $1 AND s.expires_at > now()",
+    )
+    .bind(hash_token(token))
+    .fetch_optional(db)
+    .await?;
+    Ok(row.map(|(id, name)| AuthUser { id, name }))
 }
 
 #[derive(Debug, Deserialize)]

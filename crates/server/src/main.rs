@@ -24,9 +24,16 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     tracing::info!(addr = %config.bind, domain = %config.domain, "tinlink server listening");
 
-    axum::serve(listener, router(AppState { config, db }))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        router(AppState {
+            config,
+            db,
+            events: Default::default(),
+        }),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
 }
 

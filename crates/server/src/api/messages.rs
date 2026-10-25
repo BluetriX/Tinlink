@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::access::channel_access;
 use crate::auth::AuthUser;
 use crate::error::{AppError, AppResult};
+use crate::events::EventKind;
 use crate::state::AppState;
 
 const MAX_MESSAGE_LEN: usize = 4000;
@@ -81,7 +82,7 @@ pub async fn post(
     Path(channel_id): Path<Uuid>,
     Json(req): Json<PostMessage>,
 ) -> AppResult<(StatusCode, Json<MessageInfo>)> {
-    let (_, perms) = channel_access(&state.db, channel_id, user.id).await?;
+    let (member, perms) = channel_access(&state.db, channel_id, user.id).await?;
     if !perms.contains(Permissions::SEND_MESSAGES) {
         return Err(AppError::Forbidden);
     }
@@ -99,6 +100,12 @@ pub async fn post(
     .bind(content)
     .fetch_one(&state.db)
     .await?;
+    state.events.channel(
+        EventKind::MessageCreated,
+        member.group_id,
+        channel_id,
+        &message,
+    );
     Ok((StatusCode::CREATED, Json(message)))
 }
 
@@ -108,7 +115,7 @@ pub async fn edit(
     Path((channel_id, message_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<PostMessage>,
 ) -> AppResult<Json<MessageInfo>> {
-    channel_access(&state.db, channel_id, user.id).await?;
+    let (member, _) = channel_access(&state.db, channel_id, user.id).await?;
     let content = validate_content(&req.content)?;
     // Only the author can edit; anything else looks like a missing message.
     let message = sqlx::query_as(
@@ -126,6 +133,12 @@ pub async fn edit(
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound)?;
+    state.events.channel(
+        EventKind::MessageUpdated,
+        member.group_id,
+        channel_id,
+        &message,
+    );
     Ok(Json(message))
 }
 
@@ -135,7 +148,7 @@ pub async fn delete(
     user: AuthUser,
     Path((channel_id, message_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<StatusCode> {
-    let (_, perms) = channel_access(&state.db, channel_id, user.id).await?;
+    let (member, perms) = channel_access(&state.db, channel_id, user.id).await?;
     let author: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT author_id FROM messages WHERE id = $1 AND channel_id = $2")
             .bind(message_id)
@@ -150,5 +163,11 @@ pub async fn delete(
         .bind(message_id)
         .execute(&state.db)
         .await?;
+    state.events.channel(
+        EventKind::MessageDeleted,
+        member.group_id,
+        channel_id,
+        serde_json::json!({ "id": message_id }),
+    );
     Ok(StatusCode::NO_CONTENT)
 }

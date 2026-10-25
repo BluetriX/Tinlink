@@ -4,6 +4,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tinlink_protocol::Permissions;
 use uuid::Uuid;
 
@@ -11,6 +12,7 @@ use super::groups::validate_name;
 use crate::access::{Member, channel_access, load_overwrites, to_db};
 use crate::auth::AuthUser;
 use crate::error::{AppError, AppResult};
+use crate::events::EventKind;
 use crate::state::AppState;
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -121,6 +123,9 @@ pub async fn create_category(
     .bind(req.allow_user_channels)
     .fetch_one(&state.db)
     .await?;
+    state
+        .events
+        .group(EventKind::GroupUpdated, group_id, &category);
     Ok((StatusCode::CREATED, Json(category)))
 }
 
@@ -229,6 +234,9 @@ pub async fn create(
     }
     tx.commit().await?;
 
+    state
+        .events
+        .channel(EventKind::ChannelCreated, group_id, channel.id, &channel);
     let permissions = member.channel_permissions(&state.db, channel.id).await?;
     Ok((
         StatusCode::CREATED,
@@ -252,7 +260,7 @@ pub async fn update(
     Path(channel_id): Path<Uuid>,
     Json(req): Json<UpdateChannel>,
 ) -> AppResult<Json<ChannelInfo>> {
-    let (_, perms) = channel_access(&state.db, channel_id, user.id).await?;
+    let (member, perms) = channel_access(&state.db, channel_id, user.id).await?;
     if !perms.contains(Permissions::MANAGE_CHANNELS) {
         return Err(AppError::Forbidden);
     }
@@ -269,6 +277,12 @@ pub async fn update(
     .bind(req.voice_enabled)
     .fetch_one(&state.db)
     .await?;
+    state.events.channel(
+        EventKind::ChannelUpdated,
+        member.group_id,
+        channel_id,
+        &channel,
+    );
     Ok(Json(ChannelInfo {
         channel,
         permissions: perms,
@@ -280,7 +294,7 @@ pub async fn delete(
     user: AuthUser,
     Path(channel_id): Path<Uuid>,
 ) -> AppResult<StatusCode> {
-    let (_, perms) = channel_access(&state.db, channel_id, user.id).await?;
+    let (member, perms) = channel_access(&state.db, channel_id, user.id).await?;
     if !perms.contains(Permissions::MANAGE_CHANNELS) {
         return Err(AppError::Forbidden);
     }
@@ -288,6 +302,11 @@ pub async fn delete(
         .bind(channel_id)
         .execute(&state.db)
         .await?;
+    state.events.group(
+        EventKind::ChannelDeleted,
+        member.group_id,
+        json!({ "id": channel_id }),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -336,6 +355,11 @@ pub async fn put_overwrite(
     .bind(to_db(body.deny))
     .execute(&state.db)
     .await?;
+    state.events.group(
+        EventKind::GroupUpdated,
+        member.group_id,
+        json!({ "channel_id": channel_id }),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -344,7 +368,7 @@ pub async fn delete_overwrite(
     user: AuthUser,
     Path((channel_id, kind, target)): Path<(Uuid, String, Uuid)>,
 ) -> AppResult<StatusCode> {
-    let (_, perms) = channel_access(&state.db, channel_id, user.id).await?;
+    let (member, perms) = channel_access(&state.db, channel_id, user.id).await?;
     if !perms.contains(Permissions::MANAGE_CHANNELS) {
         return Err(AppError::Forbidden);
     }
@@ -356,6 +380,11 @@ pub async fn delete_overwrite(
     .bind(target)
     .execute(&state.db)
     .await?;
+    state.events.group(
+        EventKind::GroupUpdated,
+        member.group_id,
+        json!({ "channel_id": channel_id }),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 

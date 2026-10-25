@@ -5,6 +5,8 @@ mod api;
 pub mod auth;
 pub mod config;
 pub mod error;
+pub mod events;
+mod gateway;
 pub mod livekit;
 pub mod state;
 
@@ -21,6 +23,7 @@ pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(|| async { "ok" }))
+        .route("/api/gateway", get(gateway::upgrade))
         .nest("/api", api::router())
         .layer(TraceLayer::new_for_http())
         .with_state(state)

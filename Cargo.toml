@@ -17,7 +17,8 @@ license = "AGPL-3.0-only"
 tinlink-protocol = { path = "crates/protocol" }
 anyhow = "1"
 argon2 = "0.6"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
+futures-util = "0.3"
 bitflags = { version = "2", features = ["serde"] }
 getrandom = "0.4"
 http-body-util = "0.1"
@@ -29,7 +30,8 @@ serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "time", "migrate", "macros"] }
 thiserror = "2"
 time = { version = "0.3", features = ["serde", "serde-well-known"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+tokio-tungstenite = "0.30"
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["trace"] }
 tracing = "0.1"

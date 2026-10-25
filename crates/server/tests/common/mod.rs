@@ -1,4 +1,5 @@
 //! Test helpers: an in-process app backed by a fresh database per test.
+#![allow(dead_code)] // each test binary uses a different subset of the helpers
 
 use std::sync::Arc;
 
@@ -16,6 +17,18 @@ pub const LIVEKIT_SECRET: &str = "test-secret-that-is-at-least-32-bytes";
 
 pub struct TestApp {
     router: Router,
+}
+
+impl TestApp {
+    /// Serves the app on a random local port for WebSocket tests and
+    /// returns its address. HTTP requests through `request` share its state.
+    pub async fn spawn(&self) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let router = self.router.clone();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        addr
+    }
 }
 
 pub struct Response {
@@ -47,6 +60,7 @@ impl TestApp {
         let state = AppState {
             config: Arc::new(config),
             db,
+            events: Default::default(),
         };
         Self {
             router: router(state),

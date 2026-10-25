@@ -8,6 +8,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tinlink_protocol::Permissions;
 use uuid::Uuid;
 
@@ -15,6 +16,7 @@ use super::groups::validate_name;
 use crate::access::{Member, from_db, to_db};
 use crate::auth::AuthUser;
 use crate::error::{AppError, AppResult};
+use crate::events::EventKind;
 use crate::state::AppState;
 
 #[derive(Debug, Serialize)]
@@ -111,6 +113,7 @@ pub async fn create(
     .bind(to_db(perms))
     .fetch_one(&state.db)
     .await?;
+    state.events.group(EventKind::GroupUpdated, group_id, ());
     Ok((StatusCode::CREATED, Json(role_info(row))))
 }
 
@@ -156,6 +159,7 @@ pub async fn update(
     .bind(req.permissions.map(to_db))
     .fetch_one(&state.db)
     .await?;
+    state.events.group(EventKind::GroupUpdated, group_id, ());
     Ok(Json(role_info(row)))
 }
 
@@ -180,6 +184,7 @@ pub async fn delete(
         .bind(role_id)
         .execute(&state.db)
         .await?;
+    state.events.group(EventKind::GroupUpdated, group_id, ());
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -215,6 +220,11 @@ pub async fn assign(
         .bind(role_id)
         .execute(&state.db)
         .await?;
+    state.events.group(
+        EventKind::GroupUpdated,
+        group_id,
+        json!({ "user_id": target }),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -230,5 +240,10 @@ pub async fn unassign(
         .bind(role_id)
         .execute(&state.db)
         .await?;
+    state.events.group(
+        EventKind::GroupUpdated,
+        group_id,
+        json!({ "user_id": target }),
+    );
     Ok(StatusCode::NO_CONTENT)
 }
