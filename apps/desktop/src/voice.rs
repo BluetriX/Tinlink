@@ -88,6 +88,19 @@ impl Voice {
         inner.apply();
     }
 
+    /// Detaches the microphone if it is still `track_id` (another session
+    /// may have attached its own in the meantime).
+    pub fn release_mic(&self, track_id: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner
+            .mic
+            .as_ref()
+            .is_some_and(|(mic, _)| mic.rtc_track().id() == track_id)
+        {
+            inner.mic = None;
+        }
+    }
+
     /// Forces the track's enabled state to match the voice state. Needed
     /// after (re)publishing: muting an unpublished track only sets a flag
     /// that the new sender does not pick up, and `mute()` is a no-op while

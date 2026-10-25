@@ -29,6 +29,9 @@ struct AppState {
     voice: Voice,
     audio_prefs: AudioPrefs,
     ptt_key: ptt::PttKey,
+    /// The platform audio device module, kept for the app's lifetime so
+    /// switching rooms does not reinitialise the audio devices.
+    platform_audio: std::sync::Mutex<Option<livekit::PlatformAudio>>,
     /// Participants (by identity) this client does not want to hear.
     locally_muted: std::sync::Mutex<std::collections::HashSet<String>>,
 }
@@ -93,24 +96,53 @@ fn startup_options(opts: State<'_, StartupOptions>) -> StartupOptions {
     opts.inner().clone()
 }
 
+impl AppState {
+    fn platform_audio(&self) -> CmdResult<livekit::PlatformAudio> {
+        let mut slot = self.platform_audio.lock().unwrap();
+        if let Some(audio) = slot.as_ref() {
+            return Ok(audio.clone());
+        }
+        let audio = livekit::PlatformAudio::new().map_err(|e| format!("no audio devices: {e}"))?;
+        *slot = Some(audio.clone());
+        Ok(audio)
+    }
+}
+
+/// Runs a call into the audio device module on a blocking thread with a
+/// time limit, so a stuck WebRTC worker thread cannot hang the UI.
+async fn audio_call<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> CmdResult<T> {
+    let task = tokio::task::spawn_blocking(f);
+    match tokio::time::timeout(std::time::Duration::from_secs(5), task).await {
+        Ok(result) => result.map_err(err),
+        Err(_) => Err("the audio system is not responding; restart Tinlink".into()),
+    }
+}
+
 /// Joins a LiveKit room with `token`, leaving any current room first.
 async fn connect_voice(
     app: AppHandle,
     state: &AppState,
     token: session::TokenResponse,
 ) -> CmdResult<JoinInfo> {
-    let mut slot = state.session.lock().await;
-    if let Some(old) = slot.take() {
+    // The session lock is not held while connecting: other commands
+    // (devices, mute, ...) must not wait for a slow or failing join.
+    let old = state.session.lock().await.take();
+    if let Some(old) = old {
         old.leave(&state.voice).await;
     }
-    let session = Session::join(app, token, &state.voice, &state.audio_prefs)
+    let audio = state.platform_audio()?;
+    let session = Session::join(app, token, audio, &state.voice, &state.audio_prefs)
         .await
         .map_err(|e| format!("{e:#}"))?;
     let info = JoinInfo {
         identity: session.identity().to_owned(),
         livekit_url: session.livekit_url().to_owned(),
     };
-    *slot = Some(session);
+    // Another join that finished in the meantime loses.
+    let replaced = state.session.lock().await.replace(session);
+    if let Some(replaced) = replaced {
+        replaced.leave(&state.voice).await;
+    }
     Ok(info)
 }
 
@@ -140,11 +172,8 @@ async fn leave(state: State<'_, AppState>) -> CmdResult<()> {
 
 #[tauri::command]
 async fn audio_devices(state: State<'_, AppState>) -> CmdResult<AudioDevices> {
-    if let Some(session) = state.session.lock().await.as_ref() {
-        return Ok(audio::list(session.audio()));
-    }
-    let platform = livekit::PlatformAudio::new().map_err(err)?;
-    Ok(audio::list(&platform))
+    let platform = state.platform_audio()?;
+    audio_call(move || audio::list(&platform)).await
 }
 
 /// Selects a microphone or output device; `None` restores the system
@@ -156,8 +185,26 @@ async fn set_audio_device(
     id: Option<String>,
 ) -> CmdResult<()> {
     state.audio_prefs.set(kind, id.clone());
-    if let (Some(session), Some(id)) = (state.session.lock().await.as_ref(), id) {
-        audio::switch(session.audio(), kind, &id).map_err(|e| format!("{e:#}"))?;
+    let in_call = state.session.lock().await.is_some();
+    let Some(id) = id.filter(|_| in_call) else {
+        // Applied when the next session starts.
+        return Ok(());
+    };
+    let platform = state.platform_audio()?;
+    let name = {
+        let platform = platform.clone();
+        audio_call(move || {
+            audio::switch(&platform, kind, &id)?;
+            Ok::<_, anyhow::Error>(audio::device_name(&platform, kind, &id))
+        })
+        .await?
+        .map_err(|e| format!("{e:#}"))?
+    };
+    // No audio module calls while the session lock is held.
+    if kind == DeviceKind::Input
+        && let Some(session) = state.session.lock().await.as_mut()
+    {
+        session.restart_muted_speech(name);
     }
     Ok(())
 }
@@ -208,6 +255,14 @@ async fn set_local_mute(
         session.set_local_mute(&identity, muted);
     }
     Ok(())
+}
+
+/// Restarts the app. Used when WebRTC's audio engine stopped responding
+/// (seen after the SDK gave up reconnecting); a new process recovers.
+#[tauri::command]
+fn restart_app(app: AppHandle) {
+    tracing::warn!("restarting to recover the audio engine");
+    app.restart();
 }
 
 /// Opens the viewer of a participant's screen share again.
@@ -311,6 +366,7 @@ fn main() {
             audio_prefs: AudioPrefs::default(),
             ptt_key: ptt::PttKey::default(),
             locally_muted: Default::default(),
+            platform_audio: Default::default(),
         })
         .setup(|app| {
             create_main_window(app)?;
@@ -344,6 +400,7 @@ fn main() {
             set_ptt_key,
             record_ptt_key,
             set_local_mute,
+            restart_app,
             watch_screen,
             list_screens,
             start_share,

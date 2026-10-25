@@ -92,6 +92,20 @@ pub fn list(audio: &PlatformAudio) -> AudioDevices {
     }
 }
 
+/// The display name of a device id.
+pub fn device_name(audio: &PlatformAudio, kind: DeviceKind, id: &str) -> Option<String> {
+    match kind {
+        DeviceKind::Input => audio
+            .recording_devices()
+            .find(|d| d.id.as_str() == id)
+            .map(|d| d.name),
+        DeviceKind::Output => audio
+            .playout_devices()
+            .find(|d| d.id.as_str() == id)
+            .map(|d| d.name),
+    }
+}
+
 /// Switches the device, also while audio is running.
 pub fn switch(audio: &PlatformAudio, kind: DeviceKind, id: &str) -> Result<()> {
     match kind {

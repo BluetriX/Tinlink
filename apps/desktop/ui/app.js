@@ -213,6 +213,8 @@ $("dev-form").addEventListener("submit", async (ev) => {
 });
 
 $("logout").addEventListener("click", async () => {
+  cancelRejoin();
+  settings.save({ lastVoice: null });
   await run(() => invoke("logout"));
   voiceLeft();
   state.account = null;
@@ -237,6 +239,7 @@ async function showMain(account) {
   const groupId = state.groups.some((g) => g.id === saved.groupId) ? saved.groupId : state.groups[0]?.id;
   if (groupId) await selectGroup(groupId);
   else renderEmptyGroup();
+  await rejoinLastVoice();
 }
 
 function renderEmptyGroup() {
@@ -737,14 +740,46 @@ listen("muted-speech", () => {
   playMutedBeep.timer = setTimeout(() => { $("muted-hint").hidden = true; }, 6000);
 });
 
-async function joinVoice(ch) {
+/** Joins a channel's voice; returns whether it worked. */
+async function joinVoice(ch, { quiet = false } = {}) {
   unlockAudio();
-  setStatus(`Joining ${ch.name}…`);
-  const info = await run(() => invoke("join_voice", { channelId: ch.id }));
-  if (!info) return;
+  if (!quiet) setStatus(`Joining ${ch.name}…`);
+  let info;
+  try {
+    info = await invoke("join_voice", { channelId: ch.id });
+  } catch (e) {
+    if (!quiet) setStatus(String(e), true);
+    return false;
+  }
+  cancelRejoin();
   setStatus(`Connected to voice in ${ch.name}`);
   voiceJoined(ch);
+  // Rejoined automatically after a connection loss or app restart.
+  settings.save({ lastVoice: { groupId: ch.group_id, channelId: ch.id } });
+  return !!info;
 }
+
+/** After start-up: back into the voice channel the app was closed in. */
+async function rejoinLastVoice() {
+  const last = settings.load().lastVoice;
+  if (!last || state.voiceChannel) return;
+  let channels = state.group?.id === last.groupId ? state.channels : null;
+  if (!channels) {
+    const list = await api("GET", `/groups/${last.groupId}/channels`).catch(() => null);
+    channels = list?.channels || [];
+  }
+  const ch = channels.find((c) => c.id === last.channelId);
+  if (ch && can(ch.permissions, "CONNECT")) {
+    setStatus(`Rejoining ${ch.name}…`);
+    // The server may still be unreachable (e.g. after a restart to recover).
+    if (!(await joinVoice(ch, { quiet: true }))) scheduleRejoin(ch, 0);
+  } else {
+    settings.save({ lastVoice: null });
+  }
+}
+
+// The beep needs an audio context, which the WebView only allows after a click.
+document.addEventListener("pointerdown", () => unlockAudio(), { once: true });
 
 function voiceJoined(ch) {
   state.voiceChannel = ch;
@@ -769,6 +804,8 @@ function voiceLeft() {
 }
 
 $("voice-leave").addEventListener("click", async () => {
+  cancelRejoin();
+  settings.save({ lastVoice: null });
   await run(() => invoke("leave"));
   voiceLeft();
 });
@@ -889,9 +926,76 @@ function updateSpeaking() {
 }
 
 listen("disconnected", (ev) => {
+  const { reason, rejoin } = ev.payload;
+  const ch = state.voiceChannel;
   voiceLeft();
-  setStatus(`Voice disconnected: ${ev.payload}`, true);
+  if (rejoin && ch && !ch.dev) {
+    recoverVoice(ch);
+  } else {
+    // Removed by a moderator, room deleted, ...: do not come back by itself.
+    // (A move is followed by voice_moved, which joins the new channel.)
+    settings.save({ lastVoice: null });
+    setStatus(`Voice disconnected (${reason})`, true);
+  }
 });
+
+listen("voice-reconnecting", () => {
+  if (state.voiceChannel) $("voice-status").textContent = `Voice: # ${state.voiceChannel.name} (reconnecting…)`;
+});
+listen("voice-reconnected", () => {
+  if (state.voiceChannel) $("voice-status").textContent = `Voice: # ${state.voiceChannel.name}`;
+});
+
+/**
+ * After a lost connection: when the LiveKit SDK gave up reconnecting, its
+ * audio engine can be stuck (device calls time out). Only a new process
+ * recovers; the remembered channel is joined again after the restart.
+ */
+async function recoverVoice(ch) {
+  // The engine gets stuck shortly after the SDK gives up, not at once.
+  await new Promise((r) => setTimeout(r, 4000));
+  if (await restartIfAudioStuck()) return;
+  scheduleRejoin(ch, 0);
+}
+
+/** Restarts the app if WebRTC's audio engine no longer responds. */
+async function restartIfAudioStuck() {
+  try {
+    await invoke("audio_devices");
+    return false;
+  } catch (e) {
+    if (!String(e).includes("not responding")) return false;
+  }
+  setStatus("Audio engine stuck after the connection loss, restarting Tinlink…", true);
+  await new Promise((r) => setTimeout(r, 1500));
+  await invoke("restart_app");
+  return true;
+}
+
+/** Retries joining after the connection was lost, with growing pauses. */
+let rejoinTimer = null;
+const REJOIN_DELAYS = [2, 5, 10, 20, 30, 30, 30, 30, 30, 30];
+function scheduleRejoin(ch, attempt) {
+  clearTimeout(rejoinTimer);
+  if (attempt >= REJOIN_DELAYS.length) {
+    setStatus(`Could not reconnect to ${ch.name}`, true);
+    return;
+  }
+  const delay = REJOIN_DELAYS[attempt];
+  setStatus(`Voice connection lost, reconnecting in ${delay} s…`, true);
+  rejoinTimer = setTimeout(async () => {
+    if (state.voiceChannel) return; // joined something else meanwhile
+    const ok = await joinVoice(ch, { quiet: true });
+    if (!ok) scheduleRejoin(ch, attempt + 1);
+    // A join on a stuck engine connects but carries no audio.
+    else await restartIfAudioStuck();
+  }, delay * 1000);
+}
+
+function cancelRejoin() {
+  clearTimeout(rejoinTimer);
+  rejoinTimer = null;
+}
 
 // --------------------------------------------------------- voice settings
 

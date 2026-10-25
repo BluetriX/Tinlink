@@ -208,7 +208,12 @@ activation, microphone and output selection, speaking indicators, link statistic
 loss, jitter buffer delay), screen sharing, and a native window for every
 remote screen share (closed viewers reopen with "Watch"; double-click or F11
 toggles fullscreen, Escape leaves it). "Mute" next to a participant silences
-them for you only. A volume slider per person needs a change in the LiveKit
+them for you only. After a lost connection (or a restart of the app) the
+client joins its last voice channel again by itself; leaving with "Leave" or
+being removed by a moderator ends that. The LiveKit SDK's audio engine can
+hang after a failed connection attempt, so the client checks that the voice
+server answers before connecting and, should the engine still stop
+responding, restarts itself and rejoins. A volume slider per person needs a change in the LiveKit
 SDK's C++ layer and is not possible yet. While sharing, the voice panel shows resolution, frame
 rate and encoder, and a blue frame marks the shared monitor (excluded from the
 capture, so viewers do not see it). If you talk for about 10 seconds while

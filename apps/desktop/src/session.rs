@@ -24,11 +24,15 @@ use crate::voice::Voice;
 
 /// How often the participant list is pushed to the UI.
 const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(200);
+/// Longest wait for the microphone to be published while joining.
+const PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Stats are collected on every n-th snapshot.
 const STATS_EVERY: u32 = 5;
 
 pub struct Session {
     app: AppHandle,
+    /// RTC id of this session's microphone track.
+    mic_id: String,
     room: Arc<Room>,
     /// Open screen share viewers by track; the event loop adds and removes them.
     viewers: Viewers,
@@ -36,10 +40,10 @@ pub struct Session {
     livekit_url: String,
     share: Option<ScreenShare>,
     tasks: Vec<JoinHandle<()>>,
-    /// Keeps the platform audio device module (WASAPI capture and playout) alive.
-    audio: PlatformAudio,
+    /// The platform audio device module (WASAPI capture and playout).
+    _audio: PlatformAudio,
     /// Beeps when the user talks while nothing is transmitted.
-    _muted_speech: MutedSpeechMonitor,
+    muted_speech: MutedSpeechMonitor,
 }
 
 type Viewers = Arc<std::sync::Mutex<HashMap<TrackSid, Viewer>>>;
@@ -57,6 +61,37 @@ fn apply_local_mute(room: &Room, identity: &str, muted: bool) {
             }
         }
     }
+}
+
+fn start_muted_speech(
+    app: &AppHandle,
+    room: &Arc<Room>,
+    device: Option<String>,
+) -> MutedSpeechMonitor {
+    let (room, app, hint_app) = (room.clone(), app.clone(), app.clone());
+    MutedSpeechMonitor::start(
+        device,
+        move || mic_published(&room) && app.state::<AppState>().voice.transmitting(),
+        move || {
+            let _ = hint_app.emit("muted-speech", ());
+        },
+    )
+}
+
+/// Whether the client should join again by itself after this disconnect:
+/// yes for network and server trouble, no when it was intentional (left,
+/// removed or moved by a moderator, room deleted, same account elsewhere).
+/// The protocol enum is not nameable outside the SDK, so this goes by the
+/// variant name.
+fn should_rejoin(reason: &str) -> bool {
+    !matches!(
+        reason,
+        "ClientInitiated"
+            | "DuplicateIdentity"
+            | "ParticipantRemoved"
+            | "RoomDeleted"
+            | "RoomClosed"
+    )
 }
 
 /// A LiveKit URL and access token, from the dev endpoint or a channel.
@@ -95,16 +130,46 @@ pub async fn fetch_token(server: &str, name: &str, room: &str) -> Result<TokenRe
     Ok(resp.json().await?)
 }
 
+/// The HTTP base URL of a LiveKit signaling URL (`wss://x` → `https://x`).
+fn livekit_http_base(url: &str) -> String {
+    let url = url.trim_end_matches('/');
+    if let Some(rest) = url.strip_prefix("wss://") {
+        format!("https://{rest}")
+    } else if let Some(rest) = url.strip_prefix("ws://") {
+        format!("http://{rest}")
+    } else {
+        url.to_owned()
+    }
+}
+
+/// Checks that LiveKit answers before connecting. A failed `Room::connect`
+/// leaves the SDK's audio engine blocked for the rest of the process, so
+/// an unreachable server must never get that far.
+async fn ensure_voice_server_reachable(url: &str) -> Result<()> {
+    let probe = format!("{}/rtc/validate", livekit_http_base(url));
+    let client = crate::backend::http_client();
+    let resp = tokio::time::timeout(Duration::from_secs(4), client.get(&probe).send())
+        .await
+        .map_err(|_| anyhow::anyhow!("voice server not reachable (timeout)"))?
+        .map_err(|e| anyhow::anyhow!("voice server not reachable: {e}"))?;
+    // Without a token LiveKit answers 401; 5xx means it is down behind the proxy.
+    if resp.status().is_server_error() {
+        bail!("voice server not reachable ({})", resp.status());
+    }
+    Ok(())
+}
+
 impl Session {
     pub async fn join(
         app: AppHandle,
         token: TokenResponse,
+        audio: PlatformAudio,
         voice: &Voice,
         audio_prefs: &AudioPrefs,
     ) -> Result<Self> {
+        ensure_voice_server_reachable(&token.url).await?;
         // Must exist before the first track is created so WebRTC captures
         // and plays out through the real devices (with AEC, NS and AGC).
-        let audio = PlatformAudio::new().context("no audio devices available")?;
         audio_prefs.apply(&audio);
 
         let mut options = RoomOptions::default();
@@ -120,22 +185,22 @@ impl Session {
         // Attach before publishing so push-to-talk starts muted.
         voice.set_mic(Some(mic.clone()));
         // A member muted by a moderator may not publish; they still listen.
-        if let Err(e) = publish_mic(&room, &mic).await {
-            tracing::warn!("microphone not published: {e:#}");
+        // Right after an SFU restart publishing can hang; fail the join then,
+        // so the caller (or the automatic rejoin) tries again.
+        match tokio::time::timeout(PUBLISH_TIMEOUT, publish_mic(&room, &mic)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!("microphone not published: {e:#}"),
+            Err(_) => {
+                voice.set_mic(None);
+                let _ = room.close().await;
+                bail!("publishing the microphone timed out");
+            }
         }
         voice.resync();
 
-        let muted_speech = {
-            let (room, app, hint_app) = (room.clone(), app.clone(), app.clone());
-            MutedSpeechMonitor::start(
-                audio_prefs.input_name(&audio),
-                move || mic_published(&room) && app.state::<AppState>().voice.transmitting(),
-                move || {
-                    let _ = hint_app.emit("muted-speech", ());
-                },
-            )
-        };
+        let muted_speech = start_muted_speech(&app, &room, audio_prefs.input_name(&audio));
 
+        let mic_id = mic.rtc_track().id();
         let link_stats = Arc::new(Mutex::new(HashMap::new()));
         let viewers = Viewers::default();
         let tasks = vec![
@@ -150,6 +215,7 @@ impl Session {
         ];
 
         Ok(Self {
+            mic_id,
             app,
             viewers,
             room,
@@ -157,8 +223,8 @@ impl Session {
             livekit_url: token.url,
             share: None,
             tasks,
-            audio,
-            _muted_speech: muted_speech,
+            _audio: audio,
+            muted_speech,
         })
     }
 
@@ -170,8 +236,10 @@ impl Session {
         &self.livekit_url
     }
 
-    pub fn audio(&self) -> &PlatformAudio {
-        &self.audio
+    /// Points the "talking while muted" detector at the microphone `device`.
+    pub fn restart_muted_speech(&mut self, device: Option<String>) {
+        // The old monitor stops when replaced.
+        self.muted_speech = start_muted_speech(&self.app, &self.room, device);
     }
 
     pub fn set_local_mute(&self, identity: &str, muted: bool) {
@@ -226,7 +294,7 @@ impl Session {
 
     pub async fn leave(mut self, voice: &Voice) {
         self.stop_share().await;
-        voice.set_mic(None);
+        voice.release_mic(&self.mic_id);
         for task in &self.tasks {
             // Dropping the event loop closes all viewer windows.
             task.abort();
@@ -322,9 +390,20 @@ async fn event_loop(
                     }
                 }
             }
+            RoomEvent::Reconnecting => {
+                let _ = app.emit("voice-reconnecting", ());
+            }
+            RoomEvent::Reconnected => {
+                let _ = app.emit("voice-reconnected", ());
+            }
             RoomEvent::Disconnected { reason } => {
                 tracing::warn!(?reason, "disconnected");
-                let _ = app.emit("disconnected", format!("{reason:?}"));
+                let reason = format!("{reason:?}");
+                let rejoin = should_rejoin(&reason);
+                let _ = app.emit(
+                    "disconnected",
+                    serde_json::json!({ "reason": reason, "rejoin": rejoin }),
+                );
                 // Release the session so the UI can join again. leave() aborts
                 // this task, so it has to run on its own.
                 let app = app.clone();
@@ -509,6 +588,50 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         format!("http://{addr}")
+    }
+
+    #[test]
+    fn livekit_http_base_from_signaling_url() {
+        use super::livekit_http_base;
+        assert_eq!(
+            livekit_http_base("ws://localhost:7880"),
+            "http://localhost:7880"
+        );
+        assert_eq!(
+            livekit_http_base("wss://chat.example.org/"),
+            "https://chat.example.org"
+        );
+    }
+
+    #[tokio::test]
+    async fn unreachable_voice_server_fails_fast() {
+        // Nothing listens on port 9 (discard) on the test machine.
+        let err = super::ensure_voice_server_reachable("ws://127.0.0.1:9")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not reachable"), "{err}");
+    }
+
+    #[test]
+    fn rejoins_only_after_unintended_disconnects() {
+        for reason in [
+            "SignalClose",
+            "ConnectionTimeout",
+            "MediaFailure",
+            "ServerShutdown",
+            "UnknownReason",
+        ] {
+            assert!(super::should_rejoin(reason), "{reason}");
+        }
+        for reason in [
+            "ClientInitiated",
+            "ParticipantRemoved",
+            "RoomDeleted",
+            "RoomClosed",
+            "DuplicateIdentity",
+        ] {
+            assert!(!super::should_rejoin(reason), "{reason}");
+        }
     }
 
     #[tokio::test]
