@@ -206,7 +206,10 @@ voice channel to server-mute, disconnect or move them; a moved client follows
 into the new channel by itself. In voice: push-to-talk or voice
 activation, microphone and output selection, speaking indicators, link statistics (RTT to the SFU, jitter,
 loss, jitter buffer delay), screen sharing, and a native window for every
-remote screen share. While sharing, the voice panel shows resolution, frame
+remote screen share (closed viewers reopen with "Watch"; double-click or F11
+toggles fullscreen, Escape leaves it). "Mute" next to a participant silences
+them for you only. A volume slider per person needs a change in the LiveKit
+SDK's C++ layer and is not possible yet. While sharing, the voice panel shows resolution, frame
 rate and encoder, and a blue frame marks the shared monitor (excluded from the
 capture, so viewers do not see it). If you talk for about 10 seconds while
 nothing is transmitted (push-to-talk not held, or server-muted), the app plays

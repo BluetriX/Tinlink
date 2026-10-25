@@ -372,6 +372,22 @@ label.inline input {
   gap: 6px;
 }
 
+.who .actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+
+.who .actions button {
+  padding: 0 6px;
+  font-size: 11px;
+}
+
+.who .actions button.on {
+  border-color: var(--error);
+  color: var(--error);
+}
+
 .badge {
   font-size: 10px;
   color: var(--muted);

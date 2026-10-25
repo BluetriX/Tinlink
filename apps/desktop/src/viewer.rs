@@ -7,6 +7,7 @@
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -46,7 +47,26 @@ impl Viewer {
                     }
                 })?;
         }
+        {
+            let window = window.clone();
+            let stop = stop.clone();
+            std::thread::Builder::new()
+                .name("viewer-input".into())
+                .spawn(move || input_loop(&window, &stop))?;
+        }
         Ok(Self { stop, window })
+    }
+}
+
+impl Viewer {
+    /// False once the user closed the window.
+    pub fn is_open(&self) -> bool {
+        !self.stop.load(Ordering::Relaxed) && self.window.is_visible().is_ok()
+    }
+
+    pub fn focus(&self) {
+        let _ = self.window.unminimize();
+        let _ = self.window.set_focus();
     }
 }
 
@@ -126,6 +146,58 @@ fn render_loop(
         buffer.present().map_err(|e| anyhow::anyhow!("{e}"))?;
     }
     Ok(())
+}
+
+/// The viewer is a plain window without a WebView, so it gets no click or
+/// key events; while it has focus, double-click and F11 toggle fullscreen and
+/// Escape leaves it.
+fn input_loop(window: &Window, stop: &AtomicBool) {
+    use tinlink_winput::Key;
+    const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+    let (mut button, mut f11, mut escape) = (false, false, false);
+    let mut last_click: Option<Instant> = None;
+    while !stop.load(Ordering::Relaxed) && window.is_visible().is_ok() {
+        std::thread::sleep(Duration::from_millis(15));
+        if !window.is_focused().unwrap_or(false) {
+            (button, f11, escape) = (false, false, false);
+            continue;
+        }
+        let pressed = |key: Key, was: &mut bool| {
+            let down = key.is_down();
+            let edge = down && !*was;
+            *was = down;
+            edge
+        };
+        let fullscreen = window.is_fullscreen().unwrap_or(false);
+        if pressed(Key::F11, &mut f11) {
+            let _ = window.set_fullscreen(!fullscreen);
+        }
+        if pressed(Key::ESCAPE, &mut escape) && fullscreen {
+            let _ = window.set_fullscreen(false);
+        }
+        if pressed(Key::LEFT_BUTTON, &mut button) && cursor_inside(window) {
+            let now = Instant::now();
+            if last_click.is_some_and(|t| now.duration_since(t) < DOUBLE_CLICK) {
+                let _ = window.set_fullscreen(!fullscreen);
+                last_click = None;
+            } else {
+                last_click = Some(now);
+            }
+        }
+    }
+}
+
+/// Whether the cursor is over the client area (not the title bar).
+fn cursor_inside(window: &Window) -> bool {
+    let (Ok(cursor), Ok(pos), Ok(size)) = (
+        window.cursor_position(),
+        window.inner_position(),
+        window.inner_size(),
+    ) else {
+        return false;
+    };
+    let (x, y) = (cursor.x - f64::from(pos.x), cursor.y - f64::from(pos.y));
+    x >= 0.0 && y >= 0.0 && x < f64::from(size.width) && y < f64::from(size.height)
 }
 
 /// Largest size with the frame's aspect ratio that fits into the window.

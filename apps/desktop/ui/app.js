@@ -764,6 +764,7 @@ function voiceLeft() {
   $("voice-status").classList.add("muted");
   for (const id of ["voice-leave", "share-start", "share-stop", "share-info", "tx", "muted-hint"]) $(id).hidden = true;
   $("participants").replaceChildren();
+  participantRows.clear();
   updateSpeaking();
 }
 
@@ -808,21 +809,72 @@ function renderStats(s) {
   return parts.join(" · ");
 }
 
+/** Participant rows by identity, updated in place so their buttons keep working. */
+const participantRows = new Map();
+
+function participantRow(p) {
+  const row = {
+    dot: el("span", { class: "dot" }),
+    name: el("span", { title: p.identity }),
+    muted: el("span", { class: "badge", textContent: "muted" }),
+    screen: el("span", { class: "badge", textContent: "screen" }),
+    watch: el("button", {
+      type: "button", class: "small", textContent: "Watch", title: "Open the shared screen",
+      onclick: () => run(() => invoke("watch_screen", { identity: p.identity })),
+    }),
+    mute: el("button", {
+      type: "button", class: "small", title: "Mute or unmute for you only",
+      onclick: () => toggleLocalMute(p.identity),
+    }),
+    stats: el("div", { class: "stats" }),
+  };
+  row.li = el("li", {},
+    el("div", { class: "who" }, row.dot, row.name, row.muted, row.screen,
+      p.isLocal ? null : el("span", { class: "actions" }, row.watch, row.mute)),
+    row.stats);
+  return row;
+}
+
+async function toggleLocalMute(identity) {
+  const mutes = new Set(settings.load().localMutes || []);
+  const muted = !mutes.has(identity);
+  if (muted) mutes.add(identity); else mutes.delete(identity);
+  settings.save({ localMutes: [...mutes] });
+  await run(() => invoke("set_local_mute", { identity, muted }));
+}
+
 listen("room-state", (ev) => {
   const snapshot = ev.payload;
   state.snapshot = snapshot;
-  $("participants").replaceChildren(...snapshot.participants.map((p) => {
-    const who = el("div", { class: "who" },
-      el("span", { class: `dot${p.speaking ? " speaking" : ""}` }),
-      el("span", { textContent: p.isLocal ? `${p.name} (you)` : p.name, title: p.identity }),
-      p.micMuted ? el("span", { class: "badge", textContent: "muted" }) : null,
-      p.sharingScreen ? el("span", { class: "badge", textContent: "screen" }) : null);
+  const seen = new Set();
+  const list = $("participants");
+  snapshot.participants.forEach((p, i) => {
+    seen.add(p.identity);
+    let row = participantRows.get(p.identity);
+    if (!row) {
+      row = participantRow(p);
+      participantRows.set(p.identity, row);
+    }
+    row.dot.className = `dot${p.speaking ? " speaking" : ""}`;
+    row.name.textContent = p.isLocal ? `${p.name} (you)` : p.name;
+    row.muted.hidden = !p.micMuted;
+    row.screen.hidden = !p.sharingScreen || !p.isLocal;
+    row.watch.hidden = !p.sharingScreen;
+    row.mute.textContent = p.locallyMuted ? "Unmute" : "Mute";
+    row.mute.classList.toggle("on", p.locallyMuted);
+    row.stats.textContent = renderStats(p.stats);
+    if (list.children[i] !== row.li) list.insertBefore(row.li, list.children[i] || null);
     if (p.isLocal) {
       $("tx").textContent = p.transmitting ? "transmitting" : "not transmitting";
       $("tx").classList.toggle("on", p.transmitting);
     }
-    return el("li", {}, who, el("div", { class: "stats", textContent: renderStats(p.stats) }));
-  }));
+  });
+  for (const [identity, row] of participantRows) {
+    if (!seen.has(identity)) {
+      row.li.remove();
+      participantRows.delete(identity);
+    }
+  }
   updateSpeaking();
 });
 
@@ -909,6 +961,9 @@ async function init() {
   document.querySelector(`input[name=mode][value=${mode}]`).checked = true;
   await invoke("set_voice_mode", { mode });
   if (saved.pttKey) await run(() => invoke("set_ptt_key", { key: saved.pttKey }));
+  for (const identity of saved.localMutes || []) {
+    await run(() => invoke("set_local_mute", { identity, muted: true }));
+  }
   await loadAudioDevices(saved);
 
   // Command line options are for development: they use the dev token flow.

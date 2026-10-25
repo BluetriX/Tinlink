@@ -29,6 +29,8 @@ struct AppState {
     voice: Voice,
     audio_prefs: AudioPrefs,
     ptt_key: ptt::PttKey,
+    /// Participants (by identity) this client does not want to hear.
+    locally_muted: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 /// Errors cross the IPC boundary as plain strings.
@@ -187,6 +189,35 @@ async fn record_ptt_key(state: State<'_, AppState>) -> CmdResult<String> {
     Ok(name)
 }
 
+/// Mutes or unmutes a participant for this client only.
+#[tauri::command]
+async fn set_local_mute(
+    state: State<'_, AppState>,
+    identity: String,
+    muted: bool,
+) -> CmdResult<()> {
+    {
+        let mut set = state.locally_muted.lock().unwrap();
+        if muted {
+            set.insert(identity.clone());
+        } else {
+            set.remove(&identity);
+        }
+    }
+    if let Some(session) = state.session.lock().await.as_ref() {
+        session.set_local_mute(&identity, muted);
+    }
+    Ok(())
+}
+
+/// Opens the viewer of a participant's screen share again.
+#[tauri::command]
+async fn watch_screen(state: State<'_, AppState>, identity: String) -> CmdResult<()> {
+    let slot = state.session.lock().await;
+    let session = slot.as_ref().ok_or("not connected")?;
+    session.watch(&identity).map_err(|e| format!("{e:#}"))
+}
+
 #[tauri::command]
 fn list_screens() -> Vec<screen::ScreenSource> {
     screen::list_sources()
@@ -279,6 +310,7 @@ fn main() {
             voice: Voice::default(),
             audio_prefs: AudioPrefs::default(),
             ptt_key: ptt::PttKey::default(),
+            locally_muted: Default::default(),
         })
         .setup(|app| {
             create_main_window(app)?;
@@ -311,6 +343,8 @@ fn main() {
             set_audio_device,
             set_ptt_key,
             record_ptt_key,
+            set_local_mute,
+            watch_screen,
             list_screens,
             start_share,
             stop_share,

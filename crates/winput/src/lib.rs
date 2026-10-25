@@ -60,6 +60,11 @@ fn is_modifier(code: u8) -> bool {
 }
 
 impl Key {
+    /// For window interaction (not allowed as push-to-talk key).
+    pub const LEFT_BUTTON: Key = Key(0x01);
+    pub const ESCAPE: Key = Key(0x1B);
+    pub const F11: Key = Key(0x7A);
+
     pub fn code(self) -> u8 {
         self.0
     }

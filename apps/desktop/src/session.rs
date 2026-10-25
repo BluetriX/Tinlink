@@ -30,6 +30,8 @@ const STATS_EVERY: u32 = 5;
 pub struct Session {
     app: AppHandle,
     room: Arc<Room>,
+    /// Open screen share viewers by track; the event loop adds and removes them.
+    viewers: Viewers,
     identity: String,
     livekit_url: String,
     share: Option<ScreenShare>,
@@ -38,6 +40,23 @@ pub struct Session {
     audio: PlatformAudio,
     /// Beeps when the user talks while nothing is transmitted.
     _muted_speech: MutedSpeechMonitor,
+}
+
+type Viewers = Arc<std::sync::Mutex<HashMap<TrackSid, Viewer>>>;
+
+/// Mutes or unmutes `identity`'s audio for this client only: a disabled
+/// remote track is played out at volume zero.
+fn apply_local_mute(room: &Room, identity: &str, muted: bool) {
+    for participant in room.remote_participants().into_values() {
+        if participant.identity().as_str() != identity {
+            continue;
+        }
+        for publication in participant.track_publications().into_values() {
+            if let Some(RemoteTrack::Audio(track)) = publication.track() {
+                track.rtc_track().set_enabled(!muted);
+            }
+        }
+    }
 }
 
 /// A LiveKit URL and access token, from the dev endpoint or a channel.
@@ -118,13 +137,21 @@ impl Session {
         };
 
         let link_stats = Arc::new(Mutex::new(HashMap::new()));
+        let viewers = Viewers::default();
         let tasks = vec![
-            tokio::spawn(event_loop(app.clone(), room.clone(), mic.clone(), events)),
+            tokio::spawn(event_loop(
+                app.clone(),
+                room.clone(),
+                mic.clone(),
+                viewers.clone(),
+                events,
+            )),
             tokio::spawn(snapshot_loop(app.clone(), room.clone(), mic, link_stats)),
         ];
 
         Ok(Self {
             app,
+            viewers,
             room,
             identity: token.identity,
             livekit_url: token.url,
@@ -145,6 +172,40 @@ impl Session {
 
     pub fn audio(&self) -> &PlatformAudio {
         &self.audio
+    }
+
+    pub fn set_local_mute(&self, identity: &str, muted: bool) {
+        apply_local_mute(&self.room, identity, muted);
+    }
+
+    /// Opens (or brings to front) the viewer for `identity`'s screen share.
+    pub fn watch(&self, identity: &str) -> Result<()> {
+        let participant = self
+            .room
+            .remote_participants()
+            .into_values()
+            .find(|p| p.identity().as_str() == identity)
+            .ok_or_else(|| anyhow::anyhow!("{identity} is not in this room"))?;
+        let (sid, track) = participant
+            .track_publications()
+            .into_values()
+            .find_map(|p| match (p.source(), p.track()) {
+                (TrackSource::Screenshare, Some(RemoteTrack::Video(track))) => {
+                    Some((p.sid(), track))
+                }
+                _ => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("{identity} is not sharing a screen"))?;
+        let mut viewers = self.viewers.lock().unwrap();
+        if let Some(viewer) = viewers.get(&sid)
+            && viewer.is_open()
+        {
+            viewer.focus();
+            return Ok(());
+        }
+        let title = format!("{} - screen", participant.name());
+        viewers.insert(sid, Viewer::open(&self.app, &title, track)?);
+        Ok(())
     }
 
     pub async fn start_share(&mut self, source_id: Option<u64>) -> Result<ShareInfo> {
@@ -206,11 +267,28 @@ async fn event_loop(
     app: AppHandle,
     room: Arc<Room>,
     mic: LocalAudioTrack,
+    viewers: Viewers,
     mut events: mpsc::UnboundedReceiver<RoomEvent>,
 ) {
-    let mut viewers: HashMap<TrackSid, Viewer> = HashMap::new();
+    // Dropping the viewers (on leave) closes their windows.
+    let _close_on_exit = CloseViewers(viewers.clone());
     while let Some(event) = events.recv().await {
         match event {
+            RoomEvent::TrackSubscribed {
+                track: RemoteTrack::Audio(track),
+                participant,
+                ..
+            } => {
+                let muted = app
+                    .state::<AppState>()
+                    .locally_muted
+                    .lock()
+                    .unwrap()
+                    .contains(participant.identity().as_str());
+                if muted {
+                    track.rtc_track().set_enabled(false);
+                }
+            }
             RoomEvent::TrackSubscribed {
                 track: RemoteTrack::Video(track),
                 publication,
@@ -219,13 +297,13 @@ async fn event_loop(
                 let title = format!("{} - screen", participant.name());
                 match Viewer::open(&app, &title, track) {
                     Ok(viewer) => {
-                        viewers.insert(publication.sid(), viewer);
+                        viewers.lock().unwrap().insert(publication.sid(), viewer);
                     }
                     Err(e) => tracing::error!("cannot open screen viewer: {e:#}"),
                 }
             }
             RoomEvent::TrackUnsubscribed { publication, .. } => {
-                viewers.remove(&publication.sid());
+                viewers.lock().unwrap().remove(&publication.sid());
             }
             RoomEvent::ParticipantPermissionChanged {
                 participant: Participant::Local(_),
@@ -264,6 +342,14 @@ async fn event_loop(
     }
 }
 
+struct CloseViewers(Viewers);
+
+impl Drop for CloseViewers {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().clear();
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ParticipantView {
@@ -274,6 +360,8 @@ struct ParticipantView {
     /// Local participant only: the microphone is open (key held or voice activation).
     transmitting: bool,
     mic_muted: bool,
+    /// Remote participants only: muted for this client.
+    locally_muted: bool,
     sharing_screen: bool,
     stats: Option<LinkStats>,
 }
@@ -311,6 +399,7 @@ async fn snapshot_loop(
             // Without a publication a moderator muted us on the server.
             transmitting: mic_published(&room) && app.state::<AppState>().voice.transmitting(),
             mic_muted: mic.is_muted() || !mic_published(&room),
+            locally_muted: false,
             sharing_screen: local
                 .track_publications()
                 .values()
@@ -319,6 +408,12 @@ async fn snapshot_loop(
             identity: local_identity,
             is_local: true,
         }];
+        let locally_muted = app
+            .state::<AppState>()
+            .locally_muted
+            .lock()
+            .unwrap()
+            .clone();
         let mut remotes: Vec<_> = room.remote_participants().into_values().collect();
         remotes.sort_by_key(|p| p.identity().to_string());
         for p in remotes {
@@ -332,6 +427,7 @@ async fn snapshot_loop(
                     .values()
                     .find(|p| p.source() == TrackSource::Microphone)
                     .is_none_or(|p| p.is_muted()),
+                locally_muted: locally_muted.contains(&identity),
                 sharing_screen: pubs
                     .values()
                     .any(|p| p.source() == TrackSource::Screenshare),
