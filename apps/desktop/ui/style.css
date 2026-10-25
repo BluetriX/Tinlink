@@ -93,7 +93,7 @@ label {
   color: var(--muted);
 }
 
-label input, label select {
+label input, label select, dialog select {
   display: block;
   width: 100%;
   margin-top: 2px;
@@ -311,6 +311,14 @@ label.inline input {
   margin: 0 0 2px;
   padding: 0 0 0 30px;
   font-size: 13px;
+}
+
+.voice-users li.moderatable {
+  cursor: pointer;
+}
+
+.voice-users li.moderatable:hover {
+  color: var(--accent);
 }
 
 .voice-users li {

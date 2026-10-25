@@ -162,7 +162,9 @@ Rules worth knowing:
 create groups or join one with an invite code, browse the channel tree,
 chat with history, live updates and file attachments (images inline), see
 who is in which voice channel, join a channel's voice, and create your own
-(temporary) rooms in the "Rooms" category. In voice: push-to-talk or voice
+(temporary) rooms in the "Rooms" category. Moderators click a member in a
+voice channel to server-mute, disconnect or move them; a moved client follows
+into the new channel by itself. In voice: push-to-talk or voice
 activation, speaking indicators, link statistics (RTT to the SFU, jitter,
 loss, jitter buffer delay), screen sharing, and a native window for every
 remote screen share.

@@ -102,9 +102,15 @@ function ask({ title, fields = [], text, ok = "OK", cancel = true, submit }) {
     if (text) body.append(text instanceof Node ? text : el("p", { textContent: text }));
     const inputs = {};
     for (const f of fields) {
-      const input = f.type === "checkbox"
-        ? el("input", { type: "checkbox", checked: !!f.value })
-        : el("input", { type: f.type || "text", value: f.value || "", placeholder: f.placeholder || "" });
+      let input;
+      if (f.options) {
+        input = el("select", {}, ...f.options.map(([value, label]) => el("option", { value, textContent: label })));
+        if (f.value) input.value = f.value;
+      } else if (f.type === "checkbox") {
+        input = el("input", { type: "checkbox", checked: !!f.value });
+      } else {
+        input = el("input", { type: f.type || "text", value: f.value || "", placeholder: f.placeholder || "" });
+      }
       inputs[f.id] = input;
       body.append(f.type === "checkbox"
         ? el("label", { class: "inline" }, input, ` ${f.label}`)
@@ -391,11 +397,48 @@ function channelNodes(ch) {
   const users = state.voice.filter((v) => v.channel_id === ch.id);
   const list = users.length ? el("ul", { class: "voice-users" }, ...users.map((v) => {
     const m = state.members.get(v.user_id);
-    return el("li", { dataset: { user: m?.name || v.user_id } },
-      el("span", { class: "dot" }),
-      el("span", { textContent: memberName(v.user_id) }));
+    const moderate = canModerate() && v.user_id !== state.account?.user.id;
+    return el("li", {
+      dataset: { user: m?.name || v.user_id },
+      class: moderate ? "moderatable" : "",
+      title: moderate ? "Click to moderate" : "",
+      onclick: moderate ? () => moderateVoice(ch, v.user_id) : null,
+    },
+    el("span", { class: "dot" }),
+    el("span", { textContent: memberName(v.user_id) }));
   })) : null;
   return [row, list].filter(Boolean);
+}
+
+function canModerate() {
+  const perms = state.group?.permissions;
+  return can(perms, "MUTE_MEMBERS") || can(perms, "MOVE_MEMBERS");
+}
+
+/** Server mute, disconnect or move a member in voice (the server checks roles). */
+async function moderateVoice(ch, userId) {
+  const perms = state.group.permissions;
+  const actions = [];
+  if (can(perms, "MUTE_MEMBERS")) actions.push(["mute", "Server mute"], ["unmute", "Remove server mute"]);
+  if (can(perms, "MOVE_MEMBERS")) actions.push(["disconnect", "Disconnect from voice"], ["move", "Move to channel…"]);
+  const targets = state.channels.filter((c) => c.voice_enabled && c.id !== ch.id).map((c) => [c.id, `# ${c.name}`]);
+  const fields = [{ id: "action", label: "Action", options: actions }];
+  if (targets.length && can(perms, "MOVE_MEMBERS")) fields.push({ id: "to", label: "Move to", options: targets });
+  const groupId = state.group.id;
+  await ask({
+    title: `Moderate ${memberName(userId)}`,
+    fields,
+    submit: (v) => tryText(async () => {
+      if (v.action === "mute" || v.action === "unmute") {
+        await api("PUT", `/groups/${groupId}/members/${userId}/voice-mute`, { muted: v.action === "mute" });
+      } else if (v.action === "disconnect") {
+        await api("POST", `/channels/${ch.id}/voice/${userId}/disconnect`);
+      } else if (v.action === "move") {
+        await api("POST", `/channels/${ch.id}/voice/${userId}/move`, { to: v.to });
+      }
+      setStatus("Done");
+    }),
+  });
 }
 
 async function createChannel(category) {
@@ -621,6 +664,13 @@ listen("gateway", (ev) => {
       if (inGroup) {
         state.voice = state.voice.filter((v) => !(v.channel_id === e.channel_id && v.user_id === e.data.user_id));
         renderTree();
+      }
+      break;
+    case "voice_moved":
+      // A moderator moved us: the server disconnected us, join the target.
+      if (e.user_id === state.account?.user.id) {
+        const target = state.channels.find((c) => c.id === e.data.to);
+        if (target) joinVoice(target);
       }
       break;
     case "group_deleted":

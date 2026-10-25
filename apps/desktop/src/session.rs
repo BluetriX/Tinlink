@@ -96,22 +96,14 @@ impl Session {
         let mic = LocalAudioTrack::create_audio_track("microphone", audio.rtc_source());
         // Attach before publishing so push-to-talk starts muted.
         voice.set_mic(Some(mic.clone()));
-        room.local_participant()
-            .publish_track(
-                LocalTrack::Audio(mic.clone()),
-                TrackPublishOptions {
-                    source: TrackSource::Microphone,
-                    dtx: true,
-                    red: true,
-                    ..Default::default()
-                },
-            )
-            .await
-            .context("cannot publish microphone")?;
+        // A member muted by a moderator may not publish; they still listen.
+        if let Err(e) = publish_mic(&room, &mic).await {
+            tracing::warn!("microphone not published: {e:#}");
+        }
 
         let link_stats = Arc::new(Mutex::new(HashMap::new()));
         let tasks = vec![
-            tokio::spawn(event_loop(app.clone(), events)),
+            tokio::spawn(event_loop(app.clone(), room.clone(), mic.clone(), events)),
             tokio::spawn(snapshot_loop(app, room.clone(), mic, link_stats)),
         ];
 
@@ -164,8 +156,37 @@ impl Session {
     }
 }
 
-/// Opens a viewer window for every subscribed screen share.
-async fn event_loop(app: AppHandle, mut events: mpsc::UnboundedReceiver<RoomEvent>) {
+async fn publish_mic(room: &Room, mic: &LocalAudioTrack) -> Result<()> {
+    room.local_participant()
+        .publish_track(
+            LocalTrack::Audio(mic.clone()),
+            TrackPublishOptions {
+                source: TrackSource::Microphone,
+                dtx: true,
+                red: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .context("cannot publish microphone")?;
+    Ok(())
+}
+
+fn mic_published(room: &Room) -> bool {
+    room.local_participant()
+        .track_publications()
+        .values()
+        .any(|p| p.source() == TrackSource::Microphone)
+}
+
+/// Opens a viewer window for every subscribed screen share, and publishes
+/// the microphone again when a moderator lifts a server mute.
+async fn event_loop(
+    app: AppHandle,
+    room: Arc<Room>,
+    mic: LocalAudioTrack,
+    mut events: mpsc::UnboundedReceiver<RoomEvent>,
+) {
     let mut viewers: HashMap<TrackSid, Viewer> = HashMap::new();
     while let Some(event) = events.recv().await {
         match event {
@@ -184,6 +205,23 @@ async fn event_loop(app: AppHandle, mut events: mpsc::UnboundedReceiver<RoomEven
             }
             RoomEvent::TrackUnsubscribed { publication, .. } => {
                 viewers.remove(&publication.sid());
+            }
+            RoomEvent::ParticipantPermissionChanged {
+                participant: Participant::Local(_),
+                permission: Some(permission),
+            } => {
+                // livekit.TrackSource.MICROPHONE in the protocol.
+                const MICROPHONE: i32 = 2;
+                let allowed = permission.can_publish
+                    && (permission.can_publish_sources.is_empty()
+                        || permission.can_publish_sources.contains(&MICROPHONE));
+                tracing::info!(allowed, "microphone permission changed");
+                if allowed
+                    && !mic_published(&room)
+                    && let Err(e) = publish_mic(&room, &mic).await
+                {
+                    tracing::warn!("{e:#}");
+                }
             }
             RoomEvent::Disconnected { reason } => {
                 tracing::warn!(?reason, "disconnected");
@@ -249,8 +287,9 @@ async fn snapshot_loop(
         let mut participants = vec![ParticipantView {
             name: local.name(),
             speaking: local.is_speaking(),
-            transmitting: app.state::<AppState>().voice.transmitting(),
-            mic_muted: mic.is_muted(),
+            // Without a publication a moderator muted us on the server.
+            transmitting: mic_published(&room) && app.state::<AppState>().voice.transmitting(),
+            mic_muted: mic.is_muted() || !mic_published(&room),
             sharing_screen: local
                 .track_publications()
                 .values()
