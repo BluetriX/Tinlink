@@ -86,6 +86,18 @@ pub fn router() -> Router<AppState> {
             "/channels/{channel_id}/voice-token",
             post(voice::channel_token),
         )
+        .route(
+            "/groups/{group_id}/members/{user_id}/voice-mute",
+            put(voice::set_mute),
+        )
+        .route(
+            "/channels/{channel_id}/voice/{user_id}/disconnect",
+            post(voice::disconnect),
+        )
+        .route(
+            "/channels/{channel_id}/voice/{user_id}/move",
+            post(voice::move_member),
+        )
         .route("/voice/token", post(voice::dev_token))
         .route("/livekit/webhook", post(webhook::receive))
 }

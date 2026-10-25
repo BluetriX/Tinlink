@@ -12,6 +12,7 @@ pub mod livekit;
 mod ratelimit;
 pub mod state;
 pub mod tasks;
+pub mod voice_sync;
 
 use axum::Router;
 use axum::routing::get;

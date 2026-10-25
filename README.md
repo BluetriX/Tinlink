@@ -116,6 +116,9 @@ serialized as flag names, e.g. `"VIEW_CHANNEL | SEND_MESSAGES"`.
 | GET | `/info` | Server version and source code URL |
 | POST | `/channels/{id}/voice-token` | LiveKit token for the channel's voice room |
 | POST | `/voice/token` | Unauthenticated dev token (only with `TINLINK_DEV_INSECURE_TOKENS=true`) |
+| PUT | `/groups/{id}/members/{user}/voice-mute` | Server-side mute `{"muted":true}` (MUTE_MEMBERS) |
+| POST | `/channels/{id}/voice/{user}/disconnect` | Disconnect from voice (MOVE_MEMBERS, or yourself) |
+| POST | `/channels/{id}/voice/{user}/move` | Move to another voice channel `{"to":"..."}` (MOVE_MEMBERS) |
 
 Live updates come over a WebSocket at `/api/gateway`. The client first sends
 `{"type":"auth","token":"..."}` and receives `{"type":"ready"}`, then events such as
@@ -127,6 +130,14 @@ LiveKit reports joins and leaves via webhooks (`/api/livekit/webhook`, signed wi
 the API secret). The channel list includes who is in which voice channel, and
 gateway events `voice_joined` / `voice_left` keep clients current. Temporary
 channels are deleted when their room finishes, or after 10 minutes if nobody joined.
+
+Moderation uses the LiveKit server API at `LIVEKIT_INTERNAL_URL` (in compose
+`http://livekit:7880`). Moderators can only act on members with a lower role. A
+server mute removes the microphone from the member's grant immediately and from
+future tokens. After role, overwrite or mute changes the server updates the grants
+of connected participants and disconnects anyone who lost access. A move
+disconnects the member and sends `voice_moved` (`{"from","to"}`), so the client
+joins the target room.
 
 Uploaded files are stored in `TINLINK_FILES_DIR` (default `/data/files`, limit
 `TINLINK_MAX_UPLOAD_MB`, default 25). Messages carry signed download URLs valid for
@@ -191,7 +202,7 @@ plays the other's microphone back into the shared microphone.
 
 1. Media prototype: Windows desktop client joins a room, push-to-talk, screen sharing; measure latency
 2. Core server: accounts, groups, channels, chat, live events over WebSocket (done)
-3. Permissions: roles, overwrites, user-created channels with limits (done), moderation in voice
+3. Permissions: roles, overwrites, user-created channels with limits, voice moderation (done)
 4. Files and polish: uploads (done), previews, mentions, web client
 5. Optional: end-to-end encryption, mobile, federation
 

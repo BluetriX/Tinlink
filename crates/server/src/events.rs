@@ -25,6 +25,9 @@ pub enum EventKind {
     ChannelDeleted,
     VoiceJoined,
     VoiceLeft,
+    /// A member was moved; the client of `user_id` should join `data.to`.
+    VoiceMoved,
+    VoiceMuteChanged,
     MemberJoined,
     MemberLeft,
     /// Roles, overwrites, categories or group settings changed; clients

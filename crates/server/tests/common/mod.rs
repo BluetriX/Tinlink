@@ -43,6 +43,7 @@ pub fn config() -> Config {
         open_registration: true,
         livekit: LiveKitConfig {
             public_url: "ws://livekit.test".into(),
+            internal_url: None,
             api_key: "testkey".into(),
             api_secret: LIVEKIT_SECRET.into(),
         },

@@ -1,4 +1,4 @@
-//! Minimal LiveKit access token issuer.
+//! LiveKit integration: access tokens, server API calls and webhooks.
 //!
 //! LiveKit access tokens are HS256 JWTs signed with the API secret. They are
 //! built by hand (HMAC-SHA256 + base64url) to avoid pulling in a full JWT
@@ -41,6 +41,18 @@ struct Claims {
     video: VideoGrant,
 }
 
+/// Media sources a member may publish, as named in access token grants.
+pub fn publish_sources(perms: Permissions) -> Vec<&'static str> {
+    let mut sources = Vec::new();
+    if perms.contains(Permissions::SPEAK) {
+        sources.push("microphone");
+    }
+    if perms.contains(Permissions::SHARE_SCREEN) {
+        sources.extend(["screen_share", "screen_share_audio"]);
+    }
+    sources
+}
+
 /// Creates a token that lets `identity` join `room` with the media sources
 /// allowed by `perms`.
 pub fn issue_token(
@@ -55,14 +67,7 @@ pub fn issue_token(
         .unwrap_or_default()
         .as_secs();
 
-    let mut sources = Vec::new();
-    if perms.contains(Permissions::SPEAK) {
-        sources.push("microphone");
-    }
-    if perms.contains(Permissions::SHARE_SCREEN) {
-        sources.extend(["screen_share", "screen_share_audio"]);
-    }
-
+    let sources = publish_sources(perms);
     let claims = Claims {
         iss: cfg.api_key.clone(),
         sub: identity.to_owned(),
@@ -79,6 +84,138 @@ pub fn issue_token(
         },
     };
     sign_hs256(&claims, cfg.api_secret.as_bytes())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminGrant {
+    room: String,
+    room_admin: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminClaims {
+    iss: String,
+    sub: String,
+    nbf: u64,
+    exp: u64,
+    video: AdminGrant,
+}
+
+/// Client for LiveKit's server API (Twirp over HTTP), used to change or
+/// remove participants that are already connected.
+#[derive(Clone)]
+pub struct RoomService {
+    cfg: LiveKitConfig,
+    http: reqwest::Client,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RoomServiceError {
+    #[error("LIVEKIT_INTERNAL_URL is not configured")]
+    NotConfigured,
+    #[error("participant is not connected")]
+    NotFound,
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+impl RoomService {
+    pub fn new(cfg: LiveKitConfig) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("HTTP client without TLS always builds");
+        Self { cfg, http }
+    }
+
+    async fn call(
+        &self,
+        method: &str,
+        room: &str,
+        body: serde_json::Value,
+    ) -> Result<(), RoomServiceError> {
+        let base = self
+            .cfg
+            .internal_url
+            .as_deref()
+            .ok_or(RoomServiceError::NotConfigured)?;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let claims = AdminClaims {
+            iss: self.cfg.api_key.clone(),
+            sub: "tinlink-server".into(),
+            nbf: now,
+            exp: now + 60,
+            video: AdminGrant {
+                room: room.to_owned(),
+                room_admin: true,
+            },
+        };
+        let token =
+            sign_hs256(&claims, self.cfg.api_secret.as_bytes()).map_err(anyhow::Error::from)?;
+        let url = format!(
+            "{}/twirp/livekit.RoomService/{method}",
+            base.trim_end_matches('/')
+        );
+        let res = self
+            .http
+            .post(&url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(anyhow::Error::from)?;
+        if res.status().is_success() {
+            return Ok(());
+        }
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        if status == reqwest::StatusCode::NOT_FOUND || text.contains("\"not_found\"") {
+            return Err(RoomServiceError::NotFound);
+        }
+        Err(anyhow::anyhow!("LiveKit {method} failed ({status}): {text}").into())
+    }
+
+    /// Replaces what a connected participant may publish.
+    pub async fn update_permissions(
+        &self,
+        room: &str,
+        identity: &str,
+        perms: Permissions,
+    ) -> Result<(), RoomServiceError> {
+        let sources: Vec<String> = publish_sources(perms)
+            .iter()
+            .map(|s| s.to_ascii_uppercase())
+            .collect();
+        self.call(
+            "UpdateParticipant",
+            room,
+            serde_json::json!({
+                "room": room,
+                "identity": identity,
+                "permission": {
+                    "canSubscribe": true,
+                    "canPublish": !sources.is_empty(),
+                    "canPublishData": true,
+                    "canPublishSources": sources,
+                }
+            }),
+        )
+        .await
+    }
+
+    /// Disconnects a participant from a room.
+    pub async fn remove(&self, room: &str, identity: &str) -> Result<(), RoomServiceError> {
+        self.call(
+            "RemoveParticipant",
+            room,
+            serde_json::json!({ "room": room, "identity": identity }),
+        )
+        .await
+    }
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -184,6 +321,7 @@ mod tests {
     fn test_config() -> LiveKitConfig {
         LiveKitConfig {
             public_url: "ws://localhost:7880".into(),
+            internal_url: None,
             api_key: "devkey".into(),
             api_secret: "a-secret-that-is-at-least-32-bytes-long".into(),
         }

@@ -18,6 +18,7 @@ pub const UNUSED_TEMPORARY_CHANNEL_AGE: Duration = Duration::from_secs(10 * 60);
 pub const ORPHAN_ATTACHMENT_AGE: Duration = Duration::from_secs(60 * 60);
 
 pub fn spawn(state: AppState) {
+    spawn_voice_sync(state.clone());
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(SWEEP_INTERVAL);
         loop {
@@ -75,4 +76,28 @@ pub async fn sweep(
     }
     files::remove_unreferenced(state, attachment_age).await?;
     Ok(())
+}
+
+/// Applies permission changes to connected voice participants.
+pub fn spawn_voice_sync(state: AppState) {
+    let mut events = state.events.subscribe();
+    tokio::spawn(async move {
+        loop {
+            let event = match events.recv().await {
+                Ok(event) => event,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            };
+            let only_user = match event.kind {
+                EventKind::GroupUpdated => None,
+                EventKind::MemberLeft => event.user_id,
+                _ => continue,
+            };
+            if let Err(err) =
+                crate::voice_sync::refresh_group(&state, event.group_id, only_user).await
+            {
+                tracing::warn!(error = ?err, "voice permission sync failed");
+            }
+        }
+    });
 }

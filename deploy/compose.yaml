@@ -28,6 +28,7 @@ services:
     environment:
       TINLINK_DOMAIN: ${TINLINK_DOMAIN}
       LIVEKIT_PUBLIC_URL: ${LIVEKIT_PUBLIC_URL}
+      LIVEKIT_INTERNAL_URL: http://livekit:7880
       LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
       DATABASE_URL: postgres://tinlink:${POSTGRES_PASSWORD}@postgres:5432/tinlink

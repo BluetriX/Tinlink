@@ -27,6 +27,9 @@ pub struct Config {
 pub struct LiveKitConfig {
     /// URL clients use to reach LiveKit, e.g. `wss://voice.example.org`.
     pub public_url: String,
+    /// URL the server uses for LiveKit's API, e.g. `http://livekit:7880`.
+    /// Without it, moderation of connected participants is unavailable.
+    pub internal_url: Option<String>,
     pub api_key: String,
     pub api_secret: String,
 }
@@ -43,6 +46,7 @@ impl Config {
             open_registration: optional("TINLINK_OPEN_REGISTRATION").is_none_or(|v| v == "true"),
             livekit: LiveKitConfig {
                 public_url: required("LIVEKIT_PUBLIC_URL")?,
+                internal_url: optional("LIVEKIT_INTERNAL_URL"),
                 api_key: required("LIVEKIT_API_KEY")?,
                 api_secret: required("LIVEKIT_API_SECRET")?,
             },

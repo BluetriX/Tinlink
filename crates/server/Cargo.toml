@@ -19,6 +19,8 @@ hmac.workspace = true
 mime.workspace = true
 sha2.workspace = true
 sqlx.workspace = true
+# Plain HTTP to LiveKit inside the compose network; no TLS stack needed.
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
