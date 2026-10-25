@@ -6,24 +6,20 @@ mod audio;
 mod backend;
 mod border;
 mod muted_speech;
+mod ptt;
 mod screen;
 mod session;
 mod stats;
 mod viewer;
 mod voice;
 
-use std::sync::Mutex;
-
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
-use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 use tracing_subscriber::EnvFilter;
 
 use crate::audio::{AudioDevices, AudioPrefs, DeviceKind};
 use crate::session::Session;
 use crate::voice::{Voice, VoiceMode};
-
-const DEFAULT_PTT_KEY: &str = "F8";
 
 struct AppState {
     /// The logged-in server connection, if any.
@@ -32,7 +28,7 @@ struct AppState {
     session: tokio::sync::Mutex<Option<Session>>,
     voice: Voice,
     audio_prefs: AudioPrefs,
-    ptt_key: Mutex<Option<Shortcut>>,
+    ptt_key: ptt::PttKey,
 }
 
 /// Errors cross the IPC boundary as plain strings.
@@ -169,20 +165,26 @@ fn set_voice_mode(state: State<'_, AppState>, mode: VoiceMode) {
     state.voice.set_mode(mode);
 }
 
-/// Registers `key` (e.g. "F8", "Ctrl+Shift+Space") as the global push-to-talk key.
+/// Sets the push-to-talk key, e.g. "F8", "Mouse4" or "Ctrl+Shift+Space".
 #[tauri::command]
-fn set_ptt_key(app: AppHandle, state: State<'_, AppState>, key: String) -> CmdResult<String> {
-    let shortcut: Shortcut = key.parse().map_err(err)?;
-    let gs = app.global_shortcut();
-    let mut current = state.ptt_key.lock().unwrap();
-    if let Some(old) = current.take() {
-        let _ = gs.unregister(old);
-    }
-    gs.register(shortcut).map_err(|e| {
-        format!("cannot register {key} (already used by another program or instance?): {e}")
-    })?;
-    *current = Some(shortcut);
-    Ok(shortcut.into_string())
+fn set_ptt_key(state: State<'_, AppState>, key: String) -> CmdResult<String> {
+    let hotkey: tinlink_winput::Hotkey = key.parse()?;
+    let name = hotkey.to_string();
+    state.ptt_key.set(Some(hotkey));
+    Ok(name)
+}
+
+/// Waits up to 10 s for the user to press the new push-to-talk key or
+/// mouse button and uses it.
+#[tauri::command]
+async fn record_ptt_key(state: State<'_, AppState>) -> CmdResult<String> {
+    let hotkey = tokio::task::spawn_blocking(|| ptt::capture(std::time::Duration::from_secs(10)))
+        .await
+        .map_err(err)?
+        .ok_or("no key pressed")?;
+    let name = hotkey.to_string();
+    state.ptt_key.set(Some(hotkey));
+    Ok(name)
 }
 
 #[tauri::command]
@@ -270,30 +272,18 @@ fn main() {
     }
 
     tauri::Builder::default()
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
-                    let pressed = event.state() == ShortcutState::Pressed;
-                    tracing::debug!(pressed, "push-to-talk key");
-                    app.state::<AppState>().voice.set_ptt(pressed);
-                })
-                .build(),
-        )
         .manage(StartupOptions::parse(std::env::args().skip(1)))
         .manage(AppState {
             backend: tokio::sync::Mutex::new(None),
             session: tokio::sync::Mutex::new(None),
             voice: Voice::default(),
             audio_prefs: AudioPrefs::default(),
-            ptt_key: Mutex::new(None),
+            ptt_key: ptt::PttKey::default(),
         })
         .setup(|app| {
             create_main_window(app)?;
-            let handle = app.handle().clone();
-            let state = app.state::<AppState>();
-            if let Err(e) = set_ptt_key(handle, state, DEFAULT_PTT_KEY.into()) {
-                tracing::warn!("{e}");
-            }
+            let key = app.state::<AppState>().ptt_key.clone();
+            ptt::start(app.handle().clone(), key);
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -320,6 +310,7 @@ fn main() {
             audio_devices,
             set_audio_device,
             set_ptt_key,
+            record_ptt_key,
             list_screens,
             start_share,
             stop_share,

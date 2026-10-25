@@ -1,0 +1,20 @@
+[package]
+name = "tinlink-winput"
+description = "Listen-only keyboard and mouse state for push-to-talk (Windows)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_UI_Input_KeyboardAndMouse"] }
+
+# Not `lints.workspace`: reading key state is a Win32 call the `windows`
+# crate marks unsafe. It is confined to `key_down`.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"

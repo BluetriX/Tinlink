@@ -858,6 +858,19 @@ $("ptt-set").addEventListener("click", async () => {
   }
 });
 
+$("ptt-record").addEventListener("click", async () => {
+  $("ptt-record").disabled = true;
+  $("ptt-record").textContent = "Press a key…";
+  const key = await run(() => invoke("record_ptt_key"));
+  $("ptt-record").disabled = false;
+  $("ptt-record").textContent = "Record";
+  if (key) {
+    $("ptt-key").value = key;
+    settings.save({ pttKey: key });
+    setStatus(`Push-to-talk key: ${key}`);
+  }
+});
+
 async function loadAudioDevices(saved) {
   const devices = await run(() => invoke("audio_devices"));
   if (!devices) return;
@@ -895,9 +908,7 @@ async function init() {
   const mode = opts.voiceActivation ? "voiceActivation" : saved.mode || "pushToTalk";
   document.querySelector(`input[name=mode][value=${mode}]`).checked = true;
   await invoke("set_voice_mode", { mode });
-  // The core registers the default key at startup; registering again here
-  // applies a saved key and surfaces conflicts (e.g. a second instance).
-  $("ptt-set").click();
+  if (saved.pttKey) await run(() => invoke("set_ptt_key", { key: saved.pttKey }));
   await loadAudioDevices(saved);
 
   // Command line options are for development: they use the dev token flow.

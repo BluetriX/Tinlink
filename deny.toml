@@ -28,6 +28,7 @@ exceptions = [
     { allow = ["AGPL-3.0-only"], crate = "tinlink-server" },
     { allow = ["AGPL-3.0-only"], crate = "tinlink-desktop" },
     { allow = ["AGPL-3.0-only"], crate = "tinlink-hwenc" },
+    { allow = ["AGPL-3.0-only"], crate = "tinlink-winput" },
     # Pulled in by Tauri / wry (HTML parsing, config dirs). MPL-2.0 is
     # file-level copyleft and compatible with AGPL; the crates are used unmodified.
     { allow = ["MPL-2.0"], crate = "cssparser" },

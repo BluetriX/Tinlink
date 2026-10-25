@@ -65,6 +65,7 @@ Any JavaScript that is unavoidable is vendored as a single pinned file with a ch
 ```
 apps/desktop      desktop client (Tauri 2), media in the Rust core via the LiveKit SDK
 crates/hwenc      hardware H.264 encoding via Media Foundation (Windows)
+crates/winput     listen-only keyboard and mouse state for push-to-talk (Windows)
 crates/protocol   shared types: federated user ids, permission model
 crates/server     API server and LiveKit token issuer
 deploy/           docker compose stack (Caddy, server, PostgreSQL, LiveKit)
@@ -217,8 +218,8 @@ never in the WebView:
   is Linux only), so `crates/hwenc` drives the GPU's Media Foundation encoder
   (NVENC, AMF, Quick Sync) and feeds pre-encoded frames into the SDK: up to
   1440p at 60 fps. Without a hardware encoder, WebRTC encodes in software
-  (OpenH264) at up to 1080p, 30 fps. `crates/hwenc` is the only crate that
-  uses `unsafe` (COM calls).
+  (OpenH264) at up to 1080p, 30 fps. `crates/hwenc` uses `unsafe`
+  for the COM calls; apart from it only `crates/winput` does (one Win32 call).
 - Viewing: decoded frames are scaled with libyuv and drawn with softbuffer;
   only the newest frame is rendered, and the receiver uses zero playout delay.
 
@@ -259,9 +260,11 @@ With `TINLINK_DEVTOOLS_PORT=9222` a debug build opens the WebView's DevTools
 protocol on that port for UI automation. Debug builds accept the self-signed
 certificate of the local stack; release builds do not.
 
-Push-to-talk uses a global hotkey (default `F8`, changeable in the UI, e.g.
-`Ctrl+Shift+Space`). A key can only be registered by one program at a time, so a
-second instance on the same PC should use voice activation or another key.
+Push-to-talk (default `F8`) only listens: the key still reaches the game or
+whatever program has focus. Any key, `Mouse3`/`Mouse4`/`Mouse5` (middle and side
+buttons) or a combination like `Ctrl+Shift+Space` works; "Record" in the voice
+settings takes the next key or button you press. Key state is read by
+`crates/winput`, which (like `crates/hwenc`) confines its one `unsafe` Win32 call.
 Use headphones when testing two instances on one PC, otherwise each instance
 plays the other's microphone back into the shared microphone.
 
