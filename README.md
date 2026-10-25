@@ -28,8 +28,9 @@ A Discord / TeamSpeak replacement with a focus on **low latency**.
 2. Build the Windows client (requirements under [Desktop client](#desktop-client)):
    `cargo build --release -p tinlink-desktop`. The result,
    `target/release/tinlink-desktop.exe`, runs without installation and can be
-   passed on to others. It is not signed yet, so Windows SmartScreen asks once
-   ("More info" → "Run anyway").
+   passed on to others. It needs only Windows 10/11 (64 bit) with WebView2, which
+   is preinstalled; "N" editions also need the Media Feature Pack. It is not
+   signed yet, so Windows SmartScreen asks once ("More info" → "Run anyway").
 3. Start it, enter your server's domain and create an account. The first account
    creates a group and invites others with the "Invite" button.
 
@@ -194,7 +195,7 @@ who is in which voice channel, join a channel's voice, and create your own
 (temporary) rooms in the "Rooms" category. Moderators click a member in a
 voice channel to server-mute, disconnect or move them; a moved client follows
 into the new channel by itself. In voice: push-to-talk or voice
-activation, speaking indicators, link statistics (RTT to the SFU, jitter,
+activation, microphone and output selection, speaking indicators, link statistics (RTT to the SFU, jitter,
 loss, jitter buffer delay), screen sharing, and a native window for every
 remote screen share. While sharing, the voice panel shows resolution, frame
 rate and encoder, and a blue frame marks the shared monitor (excluded from the
@@ -220,6 +221,20 @@ never in the WebView:
   uses `unsafe` (COM calls).
 - Viewing: decoded frames are scaled with libyuv and drawn with softbuffer;
   only the newest frame is rendered, and the receiver uses zero playout delay.
+
+Latency measurements (one PC, Ryzen 7 5700X3D, RTX 3070, local LiveKit, so the
+network part is close to zero; over the internet add the round trip to the server):
+
+| What | Result |
+| --- | --- |
+| Voice: RTT to the SFU / jitter / receive jitter buffer | 0–1 ms / 1–2 ms / 20–35 ms |
+| Voice: estimated mouth to ear (10 ms capture, 20 ms Opus frame, jitter buffer, playout) | 60–90 ms |
+| Screen sharing: hardware encode (NVENC via Media Foundation, 720p) | 2.7 ms median |
+| Screen sharing: glass to glass, 2560×1440 at 60 fps | about 60–70 ms |
+| CPU in a voice call, per client | about 4–5 % of one core |
+
+Glass to glass was measured with a millisecond clock on screen next to its own
+image in the viewer window (the nested images give several samples per shot).
 
 The UI is a static page in `apps/desktop/ui` (no npm, no bundler).
 
@@ -256,8 +271,9 @@ plays the other's microphone back into the shared microphone.
 2. Core server: accounts, groups, channels, chat, live events over WebSocket (done)
 3. Permissions: roles, overwrites, user-created channels with limits, voice moderation (done)
 4. Files and polish: uploads and image previews (done), Windows client for the server (done), mentions, installer
-5. More platforms: macOS, then web and mobile
-6. Optional: end-to-end encryption, federation
+5. Lower latency: 10 ms Opus frames, a GPU-only capture path without CPU colour conversion
+6. More platforms: macOS, then web and mobile
+7. Optional: end-to-end encryption, federation
 
 ## License
 
