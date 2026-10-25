@@ -1,0 +1,321 @@
+//! Groups (comparable to Discord servers), membership and invites.
+
+use axum::Json;
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use serde::{Deserialize, Serialize};
+use time::{Duration, OffsetDateTime};
+use tinlink_protocol::Permissions;
+use uuid::Uuid;
+
+use crate::access::{Member, to_db};
+use crate::auth::{AuthUser, random_token};
+use crate::error::{AppError, AppResult};
+use crate::state::AppState;
+
+const MAX_NAME_LEN: usize = 100;
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct GroupInfo {
+    pub id: Uuid,
+    pub name: String,
+    pub owner_id: Uuid,
+    pub user_channel_limit: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateGroup {
+    pub name: String,
+}
+
+pub fn validate_name(name: &str) -> AppResult<String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > MAX_NAME_LEN {
+        return Err(AppError::bad_request(format!(
+            "name must be 1-{MAX_NAME_LEN} characters"
+        )));
+    }
+    Ok(name.to_owned())
+}
+
+/// Creates a group with an @everyone role, a default category for
+/// user-created channels and a first channel.
+pub async fn create(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Json(req): Json<CreateGroup>,
+) -> AppResult<(StatusCode, Json<GroupInfo>)> {
+    let name = validate_name(&req.name)?;
+    let group_id = Uuid::now_v7();
+    let everyone = Permissions::DEFAULT_EVERYONE | Permissions::CREATE_OWN_CHANNELS;
+
+    let mut tx = state.db.begin().await?;
+    let group: GroupInfo = sqlx::query_as(
+        "INSERT INTO groups (id, name, owner_id) VALUES ($1, $2, $3)
+         RETURNING id, name, owner_id, user_channel_limit",
+    )
+    .bind(group_id)
+    .bind(&name)
+    .bind(user.id)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query("INSERT INTO roles (id, group_id, name, position, permissions) VALUES ($1, $1, '@everyone', 0, $2)")
+        .bind(group_id)
+        .bind(to_db(everyone))
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO members (group_id, user_id) VALUES ($1, $2)")
+        .bind(group_id)
+        .bind(user.id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO channels (id, group_id, name) VALUES ($1, $2, 'general')")
+        .bind(Uuid::now_v7())
+        .bind(group_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO categories (id, group_id, name, position, allow_user_channels) VALUES ($1, $2, 'Rooms', 1, true)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(group_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    Ok((StatusCode::CREATED, Json(group)))
+}
+
+pub async fn list_mine(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> AppResult<Json<Vec<GroupInfo>>> {
+    let groups = sqlx::query_as(
+        "SELECT g.id, g.name, g.owner_id, g.user_channel_limit FROM groups g
+         JOIN members m ON m.group_id = g.id WHERE m.user_id = $1 ORDER BY g.name",
+    )
+    .bind(user.id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(groups))
+}
+
+#[derive(Debug, Serialize)]
+pub struct GroupDetail {
+    #[serde(flatten)]
+    pub group: GroupInfo,
+    /// The caller's group-wide permissions, so clients can show or hide actions.
+    pub permissions: Permissions,
+}
+
+pub async fn get(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(group_id): Path<Uuid>,
+) -> AppResult<Json<GroupDetail>> {
+    let member = Member::load(&state.db, group_id, user.id).await?;
+    let group =
+        sqlx::query_as("SELECT id, name, owner_id, user_channel_limit FROM groups WHERE id = $1")
+            .bind(group_id)
+            .fetch_one(&state.db)
+            .await?;
+    Ok(Json(GroupDetail {
+        group,
+        permissions: member.group_permissions(),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateGroup {
+    pub name: Option<String>,
+    pub user_channel_limit: Option<i32>,
+}
+
+pub async fn update(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(group_id): Path<Uuid>,
+    Json(req): Json<UpdateGroup>,
+) -> AppResult<Json<GroupInfo>> {
+    Member::load(&state.db, group_id, user.id)
+        .await?
+        .require(Permissions::MANAGE_GROUP)?;
+    let name = req.name.as_deref().map(validate_name).transpose()?;
+    if req
+        .user_channel_limit
+        .is_some_and(|l| !(0..=50).contains(&l))
+    {
+        return Err(AppError::bad_request("user_channel_limit must be 0-50"));
+    }
+    let group = sqlx::query_as(
+        "UPDATE groups SET name = COALESCE($2, name), user_channel_limit = COALESCE($3, user_channel_limit)
+         WHERE id = $1 RETURNING id, name, owner_id, user_channel_limit",
+    )
+    .bind(group_id)
+    .bind(name)
+    .bind(req.user_channel_limit)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(Json(group))
+}
+
+pub async fn delete(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(group_id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    let member = Member::load(&state.db, group_id, user.id).await?;
+    if !member.is_owner {
+        return Err(AppError::Forbidden);
+    }
+    sqlx::query("DELETE FROM groups WHERE id = $1")
+        .bind(group_id)
+        .execute(&state.db)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct MemberInfo {
+    pub user_id: Uuid,
+    pub name: String,
+    pub display_name: String,
+    pub role_ids: Vec<Uuid>,
+}
+
+pub async fn list_members(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(group_id): Path<Uuid>,
+) -> AppResult<Json<Vec<MemberInfo>>> {
+    Member::load(&state.db, group_id, user.id).await?;
+    let members = sqlx::query_as(
+        "SELECT u.id AS user_id, u.name, u.display_name,
+                COALESCE(array_agg(mr.role_id) FILTER (WHERE mr.role_id IS NOT NULL), '{}') AS role_ids
+         FROM members m JOIN users u ON u.id = m.user_id
+         LEFT JOIN member_roles mr ON mr.group_id = m.group_id AND mr.user_id = m.user_id
+         WHERE m.group_id = $1 GROUP BY u.id ORDER BY u.name",
+    )
+    .bind(group_id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(members))
+}
+
+/// Leaves a group, or removes another member with KICK_MEMBERS.
+pub async fn remove_member(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((group_id, target)): Path<(Uuid, Uuid)>,
+) -> AppResult<StatusCode> {
+    let member = Member::load(&state.db, group_id, user.id).await?;
+    if target == user.id {
+        if member.is_owner {
+            return Err(AppError::bad_request("the owner cannot leave the group"));
+        }
+    } else {
+        member.require(Permissions::KICK_MEMBERS)?;
+        let other = Member::load(&state.db, group_id, target).await?;
+        if other.is_owner || other.highest_position() >= member.highest_position() {
+            return Err(AppError::Forbidden);
+        }
+    }
+    sqlx::query("DELETE FROM members WHERE group_id = $1 AND user_id = $2")
+        .bind(group_id)
+        .bind(target)
+        .execute(&state.db)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateInvite {
+    pub max_uses: Option<i32>,
+    pub expires_in_hours: Option<i64>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct InviteInfo {
+    pub code: String,
+    pub group_id: Uuid,
+    pub uses: i32,
+    pub max_uses: Option<i32>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub expires_at: Option<OffsetDateTime>,
+}
+
+pub async fn create_invite(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(group_id): Path<Uuid>,
+    Json(req): Json<CreateInvite>,
+) -> AppResult<(StatusCode, Json<InviteInfo>)> {
+    Member::load(&state.db, group_id, user.id)
+        .await?
+        .require(Permissions::MANAGE_GROUP)?;
+    let code: String = random_token()?.chars().take(12).collect();
+    let expires_at = req
+        .expires_in_hours
+        .filter(|h| *h > 0)
+        .map(|h| OffsetDateTime::now_utc() + Duration::hours(h));
+    let invite = sqlx::query_as(
+        "INSERT INTO invites (code, group_id, created_by, max_uses, expires_at) VALUES ($1, $2, $3, $4, $5)
+         RETURNING code, group_id, uses, max_uses, expires_at",
+    )
+    .bind(code)
+    .bind(group_id)
+    .bind(user.id)
+    .bind(req.max_uses.filter(|m| *m > 0))
+    .bind(expires_at)
+    .fetch_one(&state.db)
+    .await?;
+    Ok((StatusCode::CREATED, Json(invite)))
+}
+
+/// Joins the group of an invite. Joining twice is a no-op.
+pub async fn join(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(code): Path<String>,
+) -> AppResult<Json<GroupInfo>> {
+    let mut tx = state.db.begin().await?;
+    // Lock the invite row so concurrent joins cannot exceed max_uses.
+    let invite: Option<(Uuid, i32, Option<i32>)> = sqlx::query_as(
+        "SELECT group_id, uses, max_uses FROM invites
+         WHERE code = $1 AND (expires_at IS NULL OR expires_at > now())
+         FOR UPDATE",
+    )
+    .bind(&code)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (group_id, uses, max_uses) = invite.ok_or(AppError::NotFound)?;
+
+    let already_member: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM members WHERE group_id = $1 AND user_id = $2)",
+    )
+    .bind(group_id)
+    .bind(user.id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !already_member {
+        if max_uses.is_some_and(|max| uses >= max) {
+            return Err(AppError::NotFound);
+        }
+        sqlx::query("INSERT INTO members (group_id, user_id) VALUES ($1, $2)")
+            .bind(group_id)
+            .bind(user.id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE invites SET uses = uses + 1 WHERE code = $1")
+            .bind(&code)
+            .execute(&mut *tx)
+            .await?;
+    }
+    let group =
+        sqlx::query_as("SELECT id, name, owner_id, user_channel_limit FROM groups WHERE id = $1")
+            .bind(group_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    tx.commit().await?;
+    Ok(Json(group))
+}

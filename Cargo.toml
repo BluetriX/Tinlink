@@ -16,18 +16,25 @@ license = "AGPL-3.0-only"
 [workspace.dependencies]
 tinlink-protocol = { path = "crates/protocol" }
 anyhow = "1"
+argon2 = "0.6"
 axum = "0.8"
 bitflags = { version = "2", features = ["serde"] }
+getrandom = "0.4"
+http-body-util = "0.1"
 base64 = "0.23"
 hmac = "0.13"
 sha2 = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "time", "migrate", "macros"] }
 thiserror = "2"
+time = { version = "0.3", features = ["serde", "serde-well-known"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.7", features = ["trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v7", "serde"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

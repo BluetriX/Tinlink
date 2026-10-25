@@ -9,6 +9,9 @@ pub struct Config {
     /// Public domain of this server, used in user ids (`name@domain`).
     pub domain: String,
     pub bind: SocketAddr,
+    pub database_url: String,
+    /// Allow anyone to register. The first account can always be created.
+    pub open_registration: bool,
     pub livekit: LiveKitConfig,
     /// Issue voice tokens without authentication. Development only.
     pub dev_insecure_tokens: bool,
@@ -30,6 +33,8 @@ impl Config {
                 .unwrap_or_else(|| "0.0.0.0:8080".into())
                 .parse()
                 .context("TINLINK_BIND is not a valid socket address")?,
+            database_url: required("DATABASE_URL")?,
+            open_registration: optional("TINLINK_OPEN_REGISTRATION").is_none_or(|v| v == "true"),
             livekit: LiveKitConfig {
                 public_url: required("LIVEKIT_PUBLIC_URL")?,
                 api_key: required("LIVEKIT_API_KEY")?,
