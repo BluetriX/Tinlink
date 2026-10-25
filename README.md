@@ -35,6 +35,7 @@ Any JavaScript that is unavoidable is vendored as a single pinned file with a ch
 
 ```
 apps/desktop      desktop client (Tauri 2), media in the Rust core via the LiveKit SDK
+crates/hwenc      hardware H.264 encoding via Media Foundation (Windows)
 crates/protocol   shared types: federated user ids, permission model
 crates/server     API server and LiveKit token issuer
 deploy/           docker compose stack (Caddy, server, PostgreSQL, LiveKit)
@@ -178,9 +179,12 @@ never in the WebView:
 - Audio: WebRTC's audio device module (WASAPI on Windows) with its echo
   cancellation, noise suppression and gain control; Opus with DTX and RED.
 - Screen sharing: libwebrtc's desktop capturer (Windows Graphics Capture, DXGI
-  fallback), scaled to at most 1080p, 30 fps, H.264. The SDK encodes in software
-  (OpenH264) on Windows; its NVENC support is Linux only. Hardware encoding on
-  Windows (Media Foundation or NVENC feeding pre-encoded frames) is a follow-up.
+  fallback), H.264. The SDK has no hardware encoder on Windows (its NVENC support
+  is Linux only), so `crates/hwenc` drives the GPU's Media Foundation encoder
+  (NVENC, AMF, Quick Sync) and feeds pre-encoded frames into the SDK: up to
+  1440p at 60 fps. Without a hardware encoder, WebRTC encodes in software
+  (OpenH264) at up to 1080p, 30 fps. `crates/hwenc` is the only crate that
+  uses `unsafe` (COM calls).
 - Viewing: decoded frames are scaled with libyuv and drawn with softbuffer;
   only the newest frame is rendered, and the receiver uses zero playout delay.
 

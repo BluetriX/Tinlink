@@ -1,0 +1,30 @@
+[package]
+name = "tinlink-hwenc"
+description = "Hardware H.264 encoding for screen sharing (Media Foundation on Windows)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+] }
+
+# Not `lints.workspace`: Media Foundation is a COM API, so this crate is the
+# one place in the workspace that needs `unsafe`. It is confined to `mf.rs`.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"

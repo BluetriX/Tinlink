@@ -5388,10 +5388,20 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-global-shortcut",
+ "tinlink-hwenc",
  "tokio",
  "tokio-tungstenite 0.29.0",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "tinlink-hwenc"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+ "tracing",
+ "windows",
 ]
 
 [[package]]

@@ -50,8 +50,9 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy -p tinlink-desktop --all-targets --locked -- -D warnings
-      - run: cargo test -p tinlink-desktop --locked
+      - run: cargo clippy -p tinlink-desktop -p tinlink-hwenc --all-targets --locked -- -D warnings
+      # Runners have no GPU; the hardware encoder test skips itself there.
+      - run: cargo test -p tinlink-desktop -p tinlink-hwenc --locked
 
   deny:
     runs-on: ubuntu-latest
