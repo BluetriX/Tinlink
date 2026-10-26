@@ -172,6 +172,10 @@ label.inline input {
 #main-view {
   height: 100%;
   display: grid;
+  grid-template-columns: 64px 260px 1fr 200px;
+}
+
+#main-view:has(#member-panel[hidden]) {
   grid-template-columns: 64px 260px 1fr;
 }
 
@@ -730,7 +734,8 @@ input[type="range"] {
 }
 
 @media (max-width: 720px) {
-  #main-view {
+  #main-view,
+  #main-view:has(#member-panel[hidden]) {
     grid-template-columns: 56px 1fr;
     grid-template-rows: auto 1fr;
   }
@@ -741,4 +746,82 @@ input[type="range"] {
   #chat {
     grid-column: 1 / -1;
   }
+  #member-panel {
+    display: none;
+  }
+}
+
+/* Direct messages, members, typing */
+
+#dm-entry {
+  position: relative;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+#dm-button {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  padding: 0;
+  font-size: 18px;
+}
+
+#dm-button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+
+#dm-entry .badge-count {
+  bottom: 4px;
+}
+
+.channel.dm .name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#member-panel {
+  background: var(--panel);
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+#member-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px 8px;
+  overflow-y: auto;
+}
+
+#member-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+
+#member-list li.offline {
+  color: var(--muted);
+}
+
+#member-list li.clickable {
+  cursor: pointer;
+}
+
+#member-list li.clickable:hover {
+  background: var(--panel-2);
+}
+
+.typing {
+  min-height: 18px;
+  padding: 0 16px;
+  font-size: 12px;
+  font-style: italic;
+  color: var(--muted);
 }

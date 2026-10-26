@@ -225,7 +225,8 @@ strict Content Security Policy, so it is reachable at `https://<your domain>/`
 and talks to the API on the same origin.
 
 It covers what the desktop client does (chat with unread markers, @mentions
-with notifications, edit and delete, uploads, voice with push-to-talk or voice
+with notifications, edit and delete, uploads, direct messages, online status
+and typing indicators, voice with push-to-talk or voice
 activation and an adjustable threshold, per-person volume, screen sharing with
 selectable resolution and frame rate, moderation, password change), with two
 browser limits: push-to-talk only works while the tab has focus, and screen

@@ -1,7 +1,8 @@
 // Tinlink web client. Talks to the server it is served from; media runs in
 // the browser through the vendored LiveKit client. No framework, no build step.
 import {
-  Gate, MutedSpeechDetector, can, inputName, isUnread, mentionCandidates, mentionQuery, shareBitrate, shareSize,
+  Gate, MutedSpeechDetector, TypingTracker, can, inputName, isUnread, mentionCandidates, mentionQuery, shareBitrate,
+  shareSize, sortMembers, typingText,
 } from "./logic.js";
 
 const LK = window.LivekitClient;
@@ -78,7 +79,13 @@ const state = {
   loadingOlder: false,
   noOlder: false,
   pendingFiles: [],
+  view: "group", // "group" or "dms"
+  dms: [], // direct message channels from GET /dms
+  typing: new TypingTracker(),
 };
+
+/** What both sides may do in a direct message channel. */
+const DM_PERMISSIONS = "VIEW_CHANNEL | SEND_MESSAGES | ATTACH_FILES";
 
 // ------------------------------------------------------------------- api
 
@@ -279,8 +286,11 @@ async function showMain() {
   $("main-view").hidden = false;
   const user = state.session.user;
   $("me").textContent = `${user.display_name || user.name} @ ${location.host}`;
+  state.view = "group";
+  state.dms = [];
+  $("member-panel").hidden = false;
   openGateway();
-  await loadGroups();
+  await Promise.all([loadGroups(), loadDms()]);
   const saved = settings.load();
   const groupId = state.groups.some((g) => g.id === saved.groupId) ? saved.groupId : state.groups[0]?.id;
   if (groupId) await selectGroup(groupId);
@@ -311,7 +321,7 @@ function refreshGroups() {
 
 function renderGroups() {
   $("group-list").replaceChildren(...state.groups.map((g) => {
-    const current = g.id === state.group?.id;
+    const current = state.view === "group" && g.id === state.group?.id;
     return el("li", {},
       !current && g.unread ? el("span", { class: "unread-pip" }) : null,
       el("button", {
@@ -331,7 +341,8 @@ function initials(name) {
 }
 
 function updateTitle() {
-  const mentions = state.groups.reduce((n, g) => n + (g.mention_count || 0), 0);
+  const mentions = state.groups.reduce((n, g) => n + (g.mention_count || 0), 0)
+    + state.dms.reduce((n, d) => n + (d.unread_count || 0), 0);
   document.title = mentions ? `(${mentions}) Tinlink` : "Tinlink";
 }
 
@@ -379,8 +390,11 @@ async function fetchGroup(id) {
 async function selectGroup(id) {
   const [group, members, channels] = await fetchGroup(id);
   if (!group) return;
+  state.view = "group";
   state.group = group;
   settings.save({ groupId: id });
+  $("member-panel").hidden = false;
+  renderDmButton();
   setMembers(members || []);
   setChannels(channels);
   renderGroups();
@@ -393,6 +407,22 @@ async function selectGroup(id) {
 
 function setMembers(members) {
   state.members = new Map(members.map((m) => [m.user_id, m]));
+  renderMembers();
+}
+
+function renderMembers() {
+  const me = state.session?.user.id;
+  $("member-list").replaceChildren(...sortMembers([...state.members.values()]).map((m) => {
+    const other = m.user_id !== me;
+    return el("li", {
+      class: `${m.online ? "" : "offline"}${other ? " clickable" : ""}`,
+      title: other ? "Send a direct message" : "",
+      dataset: { user: m.name },
+      onclick: other ? () => openDm(m.user_id) : null,
+    },
+    el("span", { class: `dot${m.online ? " online" : ""}` }),
+    el("span", { class: "ellipsis", textContent: m.display_name || m.name }));
+  }));
 }
 
 function setChannels(list) {
@@ -411,9 +441,10 @@ function refreshGroup() {
     const [group, members, channels] = await fetchGroup(id);
     if (state.group?.id !== id || !group) return;
     state.group = group;
-    $("group-name").textContent = group.name;
     setMembers(members || []);
     setChannels(channels);
+    if (state.view !== "group") return;
+    $("group-name").textContent = group.name;
     if (state.channel) {
       const fresh = state.channels.find((c) => c.id === state.channel.id);
       if (!fresh) openChannel(state.channels[0] || null);
@@ -430,6 +461,10 @@ function memberName(userId) {
 }
 
 function renderTree() {
+  if (state.view === "dms") {
+    renderDmList();
+    return;
+  }
   const tree = $("channel-tree");
   const groupPerms = state.group?.permissions;
   const sections = [{ id: null, name: "Channels", allow_user_channels: false }, ...state.categories];
@@ -546,16 +581,18 @@ function openChannel(ch) {
   hideAutocomplete();
   $("messages").replaceChildren();
   if (!ch) {
-    $("channel-name").textContent = state.group ? "No channel" : "Select a channel";
+    $("channel-name").textContent = state.view === "dms" ? "No conversation" : state.group ? "No channel" : "Select a channel";
     $("composer").hidden = true;
+    renderTyping();
     renderTree();
     return;
   }
-  if (state.group) {
+  if (state.group && !ch.direct) {
     const channels = settings.load().channels || {};
     settings.save({ channels: { ...channels, [state.group.id]: ch.id } });
   }
-  $("channel-name").textContent = `# ${ch.name}`;
+  $("channel-name").textContent = ch.direct ? `@ ${ch.name}` : `# ${ch.name}`;
+  renderTyping();
   $("composer").hidden = !can(ch.permissions, "SEND_MESSAGES");
   $("attach").hidden = !can(ch.permissions, "ATTACH_FILES");
   renderTree();
@@ -696,8 +733,14 @@ function markRead() {
     ch.last_read_id = last.id;
     ch.last_message_id = ch.last_message_id && ch.last_message_id > last.id ? ch.last_message_id : last.id;
     ch.mention_count = 0;
+    if (ch.direct) {
+      const dm = state.dms.find((d) => d.id === ch.id);
+      if (dm) Object.assign(dm, { unread_count: 0, last_read_id: last.id });
+      renderDmButton();
+    } else {
+      refreshGroups();
+    }
     renderTree();
-    refreshGroups();
   }, 400);
 }
 
@@ -737,6 +780,7 @@ $("composer").addEventListener("submit", async (ev) => {
     state.pendingFiles = [];
     renderPending();
     $("message-input").value = "";
+    typingSentAt = 0;
     setStatus("");
     addMessage(message);
     ch.last_message_id = message.id;
@@ -761,7 +805,7 @@ function hideAutocomplete() {
 
 function updateAutocomplete() {
   const input = $("message-input");
-  const query = mentionQuery(input.value, input.selectionStart);
+  const query = state.channel?.direct ? null : mentionQuery(input.value, input.selectionStart);
   const members = [...state.members.values()].filter((m) => m.user_id !== state.session?.user.id);
   const items = query ? mentionCandidates(members, query.prefix) : [];
   if (!items.length) {
@@ -794,7 +838,10 @@ function pickMention(i) {
   input.focus();
 }
 
-$("message-input").addEventListener("input", updateAutocomplete);
+$("message-input").addEventListener("input", () => {
+  updateAutocomplete();
+  sendTyping();
+});
 $("message-input").addEventListener("blur", () => setTimeout(hideAutocomplete, 100));
 $("message-input").addEventListener("keydown", (ev) => {
   if (ac.items.length) {
@@ -831,6 +878,19 @@ function askNotificationPermission() {
 function notifyMention(m) {
   if (!("Notification" in window) || Notification.permission !== "granted") return;
   const ch = state.channels.find((c) => c.id === m.channel_id);
+  const dm = state.dms.find((d) => d.id === m.channel_id);
+  if (dm) {
+    const n = new Notification(`${m.author_name || "Someone"} (direct message)`, {
+      body: m.content.slice(0, 200) || "(attachment)",
+      tag: m.id,
+    });
+    n.onclick = () => {
+      window.focus();
+      openDm(dm.user.id);
+      n.close();
+    };
+    return;
+  }
   const n = new Notification(`${m.author_name || "Someone"}${ch ? ` in #${ch.name}` : ""}`, {
     body: m.content.slice(0, 200),
     tag: m.id,
@@ -850,6 +910,12 @@ function onMessageCreated(e) {
   const mine = m.author_id === state.session?.user.id;
   const mentioned = mentionsMe(m);
   const open = state.channel?.id === m.channel_id;
+  if (m.author_id) state.typing.remove(m.channel_id, m.author_id);
+  if (open) renderTyping();
+  if (!e.group_id) {
+    onDirectMessage(m, mine, open);
+    return;
+  }
   if (state.group?.id === e.group_id) {
     const ch = state.channels.find((c) => c.id === m.channel_id);
     if (ch) {
@@ -866,6 +932,144 @@ function onMessageCreated(e) {
     markRead();
   }
   if (mentioned && !mine && !(open && watching())) notifyMention(m);
+}
+
+// --------------------------------------------------------- direct messages
+
+async function loadDms() {
+  const list = await run(() => api("GET", "/dms"));
+  if (!list) return;
+  state.dms = list;
+  renderDmButton();
+  if (state.view === "dms") renderDmList();
+}
+
+function renderDmButton() {
+  const unread = state.dms.reduce((n, d) => n + (d.unread_count || 0), 0);
+  $("dm-button").classList.toggle("active", state.view === "dms");
+  $("dm-entry").querySelector(".badge-count")?.remove();
+  if (unread && state.view !== "dms") {
+    $("dm-entry").append(el("span", { class: "badge-count", textContent: String(unread) }));
+  }
+  updateTitle();
+}
+
+/** The chat view of a direct message channel. */
+function dmChannel(dm) {
+  return {
+    id: dm.id,
+    direct: true,
+    name: dm.user.display_name || dm.user.name,
+    permissions: DM_PERMISSIONS,
+    last_message_id: dm.last_message_id,
+    last_read_id: dm.last_read_id,
+    mention_count: 0,
+  };
+}
+
+function showDms() {
+  state.view = "dms";
+  $("group-name").textContent = "Direct messages";
+  $("group-invite").hidden = true;
+  $("member-panel").hidden = true;
+  renderGroups();
+  renderDmButton();
+  const open = state.channel?.direct ? state.dms.find((d) => d.id === state.channel.id) : null;
+  openChannel(open ? dmChannel(open) : state.dms[0] ? dmChannel(state.dms[0]) : null);
+}
+
+function renderDmList() {
+  const tree = $("channel-tree");
+  if (!state.dms.length) {
+    tree.replaceChildren(el("p", {
+      class: "muted", style: "padding: 0 12px",
+      textContent: "No conversations yet. Click a member in a group's member list to write to them.",
+    }));
+    return;
+  }
+  tree.replaceChildren(...state.dms.map((dm) => {
+    const active = dm.id === state.channel?.id;
+    const unread = !active && dm.unread_count > 0;
+    return el("div", { class: `channel dm${active ? " active" : ""}${unread ? " unread" : ""}` },
+      el("button", {
+        type: "button", class: "name", title: `@${dm.user.name}`,
+        onclick: () => openChannel(dmChannel(dm)),
+      },
+      el("span", { class: `dot${dm.user.online ? " online" : ""}` }),
+      el("span", { class: "ellipsis", textContent: dm.user.display_name || dm.user.name })),
+      unread ? el("span", { class: "mentions", textContent: String(dm.unread_count) }) : null);
+  }));
+}
+
+/** Opens (or creates) the conversation with a user and switches to it. */
+async function openDm(userId) {
+  let dm = state.dms.find((d) => d.user.id === userId);
+  if (!dm) {
+    dm = await run(() => api("POST", "/dms", { user_id: userId }));
+    if (!dm) return;
+    state.dms = [dm, ...state.dms.filter((d) => d.id !== dm.id)];
+  }
+  if (state.view !== "dms") showDms();
+  openChannel(dmChannel(dm));
+}
+
+$("dm-button").addEventListener("click", () => {
+  if (state.view !== "dms") showDms();
+});
+
+function onDirectMessage(m, mine, open) {
+  const dm = state.dms.find((d) => d.id === m.channel_id);
+  if (!dm) {
+    // A new conversation.
+    loadDms();
+  } else {
+    dm.last_message_id = m.id;
+    if (mine) dm.last_read_id = m.id;
+    else if (!(open && watching())) dm.unread_count = (dm.unread_count || 0) + 1;
+    state.dms = [dm, ...state.dms.filter((d) => d !== dm)];
+    renderDmButton();
+    if (state.view === "dms") renderDmList();
+  }
+  if (open) {
+    addMessage(m);
+    markRead();
+  }
+  if (!mine && !(open && watching())) notifyMention(m);
+}
+
+function onPresence(userId, online, inGroup) {
+  const member = inGroup ? state.members.get(userId) : null;
+  if (member && member.online !== online) {
+    member.online = online;
+    renderMembers();
+  }
+  const dm = state.dms.find((d) => d.user.id === userId);
+  if (dm && dm.user.online !== online) {
+    dm.user.online = online;
+    if (state.view === "dms") renderDmList();
+  }
+}
+
+// ----------------------------------------------------------------- typing
+
+let typingSentAt = 0;
+
+/** Tells others we are typing, at most every 3 s. */
+function sendTyping() {
+  const ch = state.channel;
+  if (!ch || !$("message-input").value.trim() || gateway?.readyState !== WebSocket.OPEN) return;
+  const now = Date.now();
+  if (now - typingSentAt < 3000) return;
+  typingSentAt = now;
+  gateway.send(JSON.stringify({ type: "typing", channel_id: ch.id }));
+}
+
+function renderTyping() {
+  clearTimeout(renderTyping.timer);
+  const names = state.channel ? state.typing.names(state.channel.id, Date.now()) : [];
+  $("typing").textContent = typingText(names);
+  // Re-check when the notices expire.
+  if (names.length) renderTyping.timer = setTimeout(renderTyping, 1000);
 }
 
 // ---------------------------------------------------------------- gateway
@@ -966,8 +1170,20 @@ function onGatewayEvent(e) {
         } else if (inGroup) refreshGroup();
       });
       break;
+    case "presence_changed":
+      onPresence(e.user_id, e.data.online, inGroup);
+      break;
+    case "typing":
+      if (e.user_id !== state.session?.user.id) {
+        const name = state.dms.find((d) => d.id === e.channel_id)?.user.display_name
+          || (state.members.has(e.user_id) ? memberName(e.user_id) : e.data.name);
+        state.typing.add(e.channel_id, e.user_id, name, Date.now());
+        if (state.channel?.id === e.channel_id) renderTyping();
+      }
+      break;
     case "resync":
       loadGroups();
+      loadDms();
       refreshGroup();
       if (state.channel) loadMessages();
       break;

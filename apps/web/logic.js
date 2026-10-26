@@ -108,3 +108,46 @@ export function inputName(ev) {
   }
   return ev.code || null;
 }
+
+/** Members sorted for the member list: online first, then by name. */
+export function sortMembers(members) {
+  const label = (m) => (m.display_name || m.name).toLowerCase();
+  return [...members].sort((a, b) => (b.online === true) - (a.online === true) || label(a).localeCompare(label(b)));
+}
+
+/**
+ * Who is typing where. A notice lasts `ttlMs` unless renewed; a message from
+ * that user ends it early.
+ */
+export class TypingTracker {
+  constructor(ttlMs = 5_000) {
+    this.ttlMs = ttlMs;
+    this.entries = new Map(); // "channel/user" -> { channelId, userId, name, until }
+  }
+
+  add(channelId, userId, name, nowMs) {
+    this.entries.set(`${channelId}/${userId}`, { channelId, userId, name, until: nowMs + this.ttlMs });
+  }
+
+  remove(channelId, userId) {
+    this.entries.delete(`${channelId}/${userId}`);
+  }
+
+  /** Names typing in a channel right now; drops expired entries. */
+  names(channelId, nowMs) {
+    const names = [];
+    for (const [key, e] of this.entries) {
+      if (e.until <= nowMs) this.entries.delete(key);
+      else if (e.channelId === channelId) names.push(e.name);
+    }
+    return names.sort();
+  }
+}
+
+/** "alice is typing…", "alice and bob are typing…", "Several people are typing…". */
+export function typingText(names) {
+  if (!names.length) return "";
+  if (names.length === 1) return `${names[0]} is typing…`;
+  if (names.length <= 3) return `${names.slice(0, -1).join(", ")} and ${names.at(-1)} are typing…`;
+  return "Several people are typing…";
+}

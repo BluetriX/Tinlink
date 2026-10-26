@@ -2,7 +2,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  Gate, MutedSpeechDetector, can, inputName, isUnread, mentionCandidates, mentionQuery, shareBitrate, shareSize,
+  Gate, MutedSpeechDetector, TypingTracker, can, inputName, isUnread, mentionCandidates, mentionQuery, shareBitrate,
+  shareSize, sortMembers, typingText,
 } from "../logic.js";
 
 test("permissions", () => {
@@ -86,4 +87,35 @@ test("push-to-talk input names", () => {
   assert.equal(inputName({ type: "keydown", code: "F8" }), "F8");
   assert.equal(inputName({ type: "mousedown", button: 3 }), "Mouse4");
   assert.equal(inputName({ type: "pointerdown", button: 0 }), null);
+});
+
+test("member list puts online members first", () => {
+  const members = [
+    { name: "zed", online: true },
+    { name: "bob", display_name: "Bob", online: false },
+    { name: "x", display_name: "Alice", online: true },
+    { name: "carl" },
+  ];
+  assert.deepEqual(sortMembers(members).map((m) => m.name), ["x", "zed", "bob", "carl"]);
+});
+
+test("typing notices expire and end with a message", () => {
+  const t = new TypingTracker(5000);
+  t.add("c1", "u1", "bob", 0);
+  t.add("c1", "u2", "alice", 1000);
+  t.add("c2", "u3", "carl", 0);
+  assert.deepEqual(t.names("c1", 2000), ["alice", "bob"]);
+  assert.deepEqual(t.names("c1", 5500), ["alice"]);
+  t.add("c1", "u2", "alice", 5500);
+  assert.deepEqual(t.names("c1", 9000), ["alice"]);
+  t.remove("c1", "u2");
+  assert.deepEqual(t.names("c1", 9000), []);
+  assert.deepEqual(t.names("c2", 9000), []);
+});
+
+test("typing text", () => {
+  assert.equal(typingText([]), "");
+  assert.equal(typingText(["bob"]), "bob is typing…");
+  assert.equal(typingText(["a", "b", "c"]), "a, b and c are typing…");
+  assert.equal(typingText(["a", "b", "c", "d"]), "Several people are typing…");
 });
