@@ -426,6 +426,7 @@ fn main() {
             account::download,
             account::image_data,
             account::join_voice,
+            account::send_typing,
             leave,
             set_voice_mode,
             set_va_threshold,

@@ -82,6 +82,8 @@ const state = {
   voiceChannel: null, // channel we are connected to (or a dev room name)
   snapshot: null, // last room-state from the core
   pendingFiles: [],
+  view: "group", // "group" or "dms"
+  dms: [], // direct message channels, most recent first
 };
 
 // ---------------------------------------------------------------- dialog
@@ -236,8 +238,10 @@ async function showMain(account) {
   $("change-password").hidden = !account;
   $("logout").textContent = account ? "Log out" : "Back";
   await loadScreens();
+  $("dm-button").parentElement.hidden = !account;
   if (!account) return;
   await loadGroups();
+  await loadDms();
   const saved = settings.load();
   const groupId = state.groups.some((g) => g.id === saved.groupId) ? saved.groupId : state.groups[0]?.id;
   if (groupId) await selectGroup(groupId);
@@ -265,7 +269,7 @@ function renderGroups() {
     g.unread && g.id !== state.group?.id ? el("span", { class: "unread-dot" }) : null,
     el("button", {
       type: "button",
-      class: g.id === state.group?.id ? "active" : "",
+      class: g.id === state.group?.id && state.view === "group" ? "active" : "",
       title: g.name,
       textContent: initials(g.name),
       onclick: () => selectGroup(g.id),
@@ -303,6 +307,8 @@ async function markRead() {
   if (!ch || !last || !document.hasFocus()) return;
   const entry = channelById(ch.id);
   if (entry && !isUnread(entry) && !entry.mention_count && entry.last_read_id >= last.id) return;
+  const known = dmById(ch.id);
+  if (known && !known.unread_count && known.last_read_id >= last.id) return;
   try {
     await api("PUT", `/channels/${ch.id}/read`, { message_id: last.id });
   } catch {
@@ -313,6 +319,12 @@ async function markRead() {
     entry.last_read_id = last.id;
     entry.mention_count = 0;
   }
+  const dm = dmById(ch.id);
+  if (dm) {
+    dm.last_read_id = last.id;
+    dm.unread_count = 0;
+    renderDmBadge();
+  }
   renderTree();
   updateGroupBadges();
 }
@@ -322,6 +334,8 @@ window.addEventListener("focus", scheduleMarkRead);
 /** A new message somewhere: unread state, badges and mention notification. */
 function trackNewMessage(e) {
   const m = e.data;
+  if (typingUsers.delete(m.author_id)) renderTyping();
+  if (!e.group_id) return trackDmMessage(m);
   const mine = m.author_id === myId();
   const mentioned = (m.mentions || []).includes(myId());
   const seen = m.channel_id === state.channel?.id && document.hasFocus();
@@ -394,7 +408,9 @@ async function selectGroup(id) {
     run(() => api("GET", `/groups/${id}/channels`)),
   ]);
   if (!group) return;
+  state.view = "group";
   state.group = group;
+  renderDmBadge();
   settings.save({ groupId: id });
   setMembers(members || []);
   setChannels(channels);
@@ -431,10 +447,10 @@ function refreshGroup() {
     ]);
     if (state.group?.id !== id || !group) return;
     state.group = group;
-    $("group-name").textContent = group.name;
+    if (state.view === "group") $("group-name").textContent = group.name;
     setMembers(members || []);
     setChannels(channels);
-    if (state.channel && !state.channels.some((c) => c.id === state.channel.id)) {
+    if (state.channel && !state.channel.dm && !state.channels.some((c) => c.id === state.channel.id)) {
       openChannel(state.channels[0] || null);
     }
   }, 150);
@@ -448,6 +464,7 @@ function memberName(userId) {
 }
 
 function renderTree() {
+  if (state.view === "dms") return renderDmList();
   const tree = $("channel-tree");
   const groupPerms = state.group?.permissions;
   const sections = [{ id: null, name: "Channels", allow_user_channels: false }, ...state.categories];
@@ -465,9 +482,148 @@ function renderTree() {
       }) : null));
     for (const ch of channels) nodes.push(...channelNodes(ch));
   }
+  nodes.push(...memberNodes());
   tree.replaceChildren(...nodes);
   updateSpeaking();
 }
+
+/** Group members, online first, with a "Message" action. */
+function memberNodes() {
+  const members = [...state.members.values()].sort((a, b) =>
+    (b.online === true) - (a.online === true)
+      || (a.display_name || a.name).localeCompare(b.display_name || b.name));
+  if (!members.length) return [];
+  const online = members.filter((m) => m.online).length;
+  return [
+    el("div", { class: "category" }, el("span", { textContent: `Members — ${online} online` })),
+    ...members.map((m) => el("div", { class: `member${m.online ? "" : " offline"}`, title: `@${m.name}` },
+      el("span", { class: `dot${m.online ? " online" : ""}` }),
+      el("span", { class: "who-name", textContent: m.user_id === myId() ? `${m.display_name || m.name} (you)` : m.display_name || m.name }),
+      m.user_id === myId() ? null : el("button", {
+        type: "button", class: "small", textContent: "Message",
+        onclick: () => openDmWith(m.user_id),
+      }))),
+  ];
+}
+
+// ------------------------------------------------------- direct messages
+
+const dmById = (id) => state.dms.find((d) => d.id === id);
+const dmName = (dm) => dm.user.display_name || dm.user.name;
+
+async function loadDms() {
+  state.dms = (await api("GET", "/dms").catch(() => null)) || [];
+  renderDmBadge();
+  if (state.view === "dms") renderDmList();
+}
+
+function renderDmBadge() {
+  const unread = state.dms.reduce((n, d) => n + (d.unread_count || 0), 0);
+  $("dm-badge").hidden = !unread;
+  $("dm-badge").textContent = String(unread);
+  $("dm-button").classList.toggle("active", state.view === "dms");
+}
+
+function renderDmList() {
+  const rows = state.dms.map((dm) => el("div", {
+    class: ["dm", dm.id === state.channel?.id && "active", dm.unread_count && "unread"].filter(Boolean).join(" "),
+    title: `@${dm.user.name}`,
+    onclick: () => openDm(dm),
+  },
+  el("span", { class: `dot${dm.user.online ? " online" : ""}` }),
+  el("span", { class: "who-name", textContent: dmName(dm) }),
+  dm.unread_count ? el("span", { class: "mention-badge", textContent: String(dm.unread_count) }) : null));
+  $("channel-tree").replaceChildren(...(rows.length ? rows : [
+    el("p", { class: "muted dm-empty", textContent: "No conversations yet. Use \"Message\" next to a group member." }),
+  ]));
+  renderDmBadge();
+}
+
+/** Switches the sidebar to the direct message list. */
+async function showDms(openId) {
+  state.view = "dms";
+  $("group-name").textContent = "Direct messages";
+  $("group-invite").hidden = true;
+  renderGroups();
+  await loadDms();
+  renderDmList();
+  const dm = dmById(openId || settings.load().dmId) || state.dms[0] || null;
+  if (dm) openDm(dm);
+  else openChannel(null);
+}
+
+function openDm(dm) {
+  settings.save({ dmId: dm.id });
+  openChannel({ id: dm.id, name: dmName(dm), dm: true, permissions: "SEND_MESSAGES | ATTACH_FILES" });
+}
+
+/** Opens (or creates) the conversation with a group member. */
+async function openDmWith(userId) {
+  const dm = await run(() => api("POST", "/dms", { user_id: userId }));
+  if (dm) await showDms(dm.id);
+}
+
+$("dm-button").addEventListener("click", () => showDms());
+
+/** A message in a direct conversation: unread count, order, notification. */
+async function trackDmMessage(m) {
+  let dm = dmById(m.channel_id);
+  // A new conversation someone else started: the fresh list already counts it.
+  const fresh = !dm;
+  if (fresh) {
+    await loadDms();
+    dm = dmById(m.channel_id);
+  }
+  const mine = m.author_id === myId();
+  const seen = m.channel_id === state.channel?.id && document.hasFocus();
+  if (dm && !fresh) {
+    if (!dm.last_message_id || dm.last_message_id < m.id) dm.last_message_id = m.id;
+    if (mine) dm.last_read_id = m.id;
+    else if (!seen && !(dm.last_read_id && dm.last_read_id >= m.id)) dm.unread_count = (dm.unread_count || 0) + 1;
+    state.dms.sort((a, b) => (b.last_message_id || "").localeCompare(a.last_message_id || ""));
+  }
+  renderDmBadge();
+  if (state.view === "dms") renderDmList();
+  if (!mine && !seen) {
+    const body = m.content || (m.attachments?.length ? "sent a file" : "");
+    invoke("notify", { title: `Message from ${m.author_name || "someone"}`, body: body.slice(0, 200) });
+  }
+}
+
+// ------------------------------------------------------------- typing
+
+const typingUsers = new Map(); // user id -> { name, until }
+let typingSentAt = 0;
+
+$("message-input").addEventListener("input", () => {
+  const ch = state.channel;
+  if (!ch || !$("message-input").value.trim() || Date.now() - typingSentAt < 3000) return;
+  typingSentAt = Date.now();
+  invoke("send_typing", { channelId: ch.id }).catch(() => {});
+});
+
+function displayNameOf(userId, fallback) {
+  const m = state.members.get(userId);
+  if (m) return m.display_name || m.name;
+  const dm = state.dms.find((d) => d.user.id === userId);
+  return dm ? dmName(dm) : fallback;
+}
+
+function renderTyping() {
+  const now = Date.now();
+  for (const [id, t] of typingUsers) if (t.until <= now) typingUsers.delete(id);
+  const names = [...typingUsers.values()].map((t) => t.name);
+  $("typing").textContent = names.length === 0 ? ""
+    : names.length === 1 ? `${names[0]} is typing…`
+      : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]} are typing…`;
+}
+
+function clearTyping() {
+  typingUsers.clear();
+  renderTyping();
+}
+
+setInterval(renderTyping, 1000);
 
 function channelNodes(ch) {
   const canJoin = ch.voice_enabled && can(ch.permissions, "CONNECT");
@@ -556,6 +712,7 @@ async function createChannel(category) {
 
 function openChannel(ch) {
   state.channel = ch;
+  clearTyping();
   state.messages = [];
   state.noOlder = false;
   state.pendingFiles = [];
@@ -568,11 +725,11 @@ function openChannel(ch) {
     return;
   }
   renderTree();
-  if (state.group) {
+  if (state.group && !ch.dm) {
     const channels = settings.load().channels || {};
     settings.save({ channels: { ...channels, [state.group.id]: ch.id } });
   }
-  $("channel-name").textContent = `# ${ch.name}`;
+  $("channel-name").textContent = ch.dm ? `@ ${ch.name}` : `# ${ch.name}`;
   $("composer").hidden = !can(ch.permissions, "SEND_MESSAGES");
   $("attach").hidden = !can(ch.permissions, "ATTACH_FILES");
   loadMessages();
@@ -873,6 +1030,19 @@ listen("gateway", (ev) => {
     case "message_updated":
       replaceMessage(e.data);
       break;
+    case "presence_changed": {
+      const member = inGroup ? state.members.get(e.user_id) : null;
+      if (member) member.online = e.data.online;
+      for (const dm of state.dms) if (dm.user.id === e.user_id) dm.user.online = e.data.online;
+      renderTree();
+      break;
+    }
+    case "typing":
+      if (e.channel_id === state.channel?.id && e.user_id !== myId()) {
+        typingUsers.set(e.user_id, { name: displayNameOf(e.user_id, e.data.name), until: Date.now() + 5000 });
+        renderTyping();
+      }
+      break;
     case "message_deleted":
       removeMessage(e.data.id);
       break;
@@ -906,6 +1076,7 @@ listen("gateway", (ev) => {
       break;
     case "resync":
       loadGroups();
+      loadDms();
       refreshGroup();
       if (state.channel) loadMessages();
       break;

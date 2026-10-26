@@ -246,7 +246,10 @@ autocomplete (mentions of you are highlighted), see unread channels in bold
 with mention badges on channels and groups, get a Windows notification and a
 flashing taskbar button for a mention while the window is in the background
 or another channel is open (shown as "Windows PowerShell", because the
-portable exe has no registered app id), change your password, see
+portable exe has no registered app id), change your password, see who is online (member list, online first) and
+who is typing, write direct messages to group members ("Message" next to a
+member; "@" at the top of the group rail lists conversations with unread
+counts, a new message notifies like a mention), see
 who is in which voice channel, join a channel's voice, and create your own
 (temporary) rooms in the "Rooms" category. Moderators click a member in a
 voice channel to server-mute, disconnect or move them; a moved client follows

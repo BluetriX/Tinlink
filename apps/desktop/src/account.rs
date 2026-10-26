@@ -206,6 +206,15 @@ pub async fn image_data(state: State<'_, AppState>, url: String) -> CmdResult<St
     Ok(format!("data:{content_type};base64,{b64}"))
 }
 
+/// Tells others in the channel that this user is typing (the UI throttles).
+#[tauri::command]
+pub async fn send_typing(state: State<'_, AppState>, channel_id: String) -> CmdResult<()> {
+    let guard = state.backend.lock().await;
+    let backend = guard.as_ref().ok_or("not logged in")?;
+    backend.gateway_send(json!({ "type": "typing", "channel_id": channel_id }));
+    Ok(())
+}
+
 /// Joins the voice room of a channel.
 #[tauri::command]
 pub async fn join_voice(

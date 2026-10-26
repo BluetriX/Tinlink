@@ -14,6 +14,7 @@ use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -116,6 +117,8 @@ pub struct Backend {
     token: String,
     user: Value,
     gateway: Option<JoinHandle<()>>,
+    /// Messages for the gateway (e.g. typing notices); dropped while offline.
+    gateway_tx: Option<mpsc::UnboundedSender<Value>>,
 }
 
 impl Backend {
@@ -149,6 +152,7 @@ impl Backend {
             token,
             user: session["user"].clone(),
             gateway: None,
+            gateway_tx: None,
         };
         Ok((backend, saved))
     }
@@ -161,6 +165,7 @@ impl Backend {
             token: saved.token.clone(),
             user: Value::Null,
             gateway: None,
+            gateway_tx: None,
         };
         backend.user = backend.request(Method::GET, "/users/me", None).await?;
         Ok(backend)
@@ -263,7 +268,16 @@ impl Backend {
     pub fn start_gateway(&mut self, app: AppHandle) {
         let url = gateway_url(&self.server);
         let token = self.token.clone();
-        self.gateway = Some(tokio::spawn(gateway_loop(app, url, token)));
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.gateway_tx = Some(tx);
+        self.gateway = Some(tokio::spawn(gateway_loop(app, url, token, rx)));
+    }
+
+    /// Sends a message over the gateway, e.g. `{"type":"typing",...}`.
+    pub fn gateway_send(&self, message: Value) {
+        if let Some(tx) = &self.gateway_tx {
+            let _ = tx.send(message);
+        }
     }
 }
 
@@ -277,11 +291,18 @@ impl Drop for Backend {
 
 /// Keeps a gateway connection open, reconnecting with backoff. After a
 /// reconnect the UI gets a `resync` so it reloads what it missed.
-async fn gateway_loop(app: AppHandle, url: String, token: String) {
+async fn gateway_loop(
+    app: AppHandle,
+    url: String,
+    token: String,
+    mut outgoing: mpsc::UnboundedReceiver<Value>,
+) {
     let mut delay = Duration::from_secs(1);
     let mut first = true;
     loop {
-        match gateway_session(&app, &url, &token, !first).await {
+        // Typing notices from while we were offline are stale.
+        while outgoing.try_recv().is_ok() {}
+        match gateway_session(&app, &url, &token, !first, &mut outgoing).await {
             Ok(()) => delay = Duration::from_secs(1),
             Err(e) => tracing::warn!("gateway: {e:#}"),
         }
@@ -292,7 +313,13 @@ async fn gateway_loop(app: AppHandle, url: String, token: String) {
     }
 }
 
-async fn gateway_session(app: &AppHandle, url: &str, token: &str, resync: bool) -> Result<()> {
+async fn gateway_session(
+    app: &AppHandle,
+    url: &str,
+    token: &str,
+    resync: bool,
+    outgoing: &mut mpsc::UnboundedReceiver<Value>,
+) -> Result<()> {
     let tls = native_tls::TlsConnector::builder()
         .danger_accept_invalid_certs(ACCEPT_INVALID_CERTS)
         .build()?;
@@ -308,7 +335,18 @@ async fn gateway_session(app: &AppHandle, url: &str, token: &str, resync: bool) 
         json!({ "type": "auth", "token": token }).to_string(),
     ))
     .await?;
-    while let Some(msg) = ws.next().await {
+    loop {
+        let msg = tokio::select! {
+            msg = ws.next() => msg,
+            out = outgoing.recv() => {
+                match out {
+                    Some(out) => ws.send(Message::text(out.to_string())).await?,
+                    None => break,
+                }
+                continue;
+            }
+        };
+        let Some(msg) = msg else { break };
         match msg? {
             Message::Text(text) => {
                 let event: Value = serde_json::from_str(text.as_str())?;
