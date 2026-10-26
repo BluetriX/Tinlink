@@ -232,9 +232,12 @@ never in the WebView:
 - Screen sharing: libwebrtc's desktop capturer (Windows Graphics Capture, DXGI
   fallback), H.264. The SDK has no hardware encoder on Windows (its NVENC support
   is Linux only), so `crates/hwenc` drives the GPU's Media Foundation encoder
-  (NVENC, AMF, Quick Sync) and feeds pre-encoded frames into the SDK: up to
-  1440p at 60 fps. Without a hardware encoder, WebRTC encodes in software
-  (OpenH264) at up to 1080p, 30 fps. `crates/hwenc` uses `unsafe`
+  (NVENC, AMF, Quick Sync) and feeds pre-encoded frames into the SDK, up to
+  native 4K at 60 fps. Without a hardware encoder, WebRTC encodes in software
+  (OpenH264) at up to 1080p, 30 fps. Resolution (native, 1440p, 1080p, 720p;
+  only scales down) and frame rate (60, 30, 15; default 1080p, 30) are chosen in
+  the voice settings and can be changed while sharing; the bitrate follows
+  (0.06 bit per pixel and frame, 1.5 to 20 Mbit/s). `crates/hwenc` uses `unsafe`
   for the COM calls; apart from it only `crates/winput` does (one Win32 call).
 - Viewing: decoded frames are scaled with libyuv and drawn with softbuffer;
   only the newest frame is rendered, and the receiver uses zero playout delay.

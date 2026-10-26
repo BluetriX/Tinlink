@@ -811,18 +811,44 @@ $("voice-leave").addEventListener("click", async () => {
   voiceLeft();
 });
 
-$("share-start").addEventListener("click", async () => {
+function shareSettings() {
+  const height = $("share-height").value;
+  return { maxHeight: height === "native" ? null : Number(height), fps: Number($("share-fps").value) };
+}
+
+async function startShare() {
   $("share-start").disabled = true;
   const id = $("screens").value;
-  const info = await run(() => invoke("start_share", { sourceId: id ? Number(id) : null }));
+  const info = await run(() => invoke("start_share", {
+    sourceId: id ? Number(id) : null,
+    settings: shareSettings(),
+  }));
   $("share-start").disabled = false;
-  if (!info) return;
+  if (!info) return false;
   $("share-start").hidden = true;
   $("share-stop").hidden = false;
   const encoder = info.encoder ?? "software H.264 (no hardware encoder found)";
-  $("share-info").textContent = `Sharing ${info.width}×${info.height} @ ${info.fps} fps · ${encoder}`;
+  const mbit = (info.bitrateBps / 1e6).toFixed(1);
+  $("share-info").textContent = `Sharing ${info.width}×${info.height} @ ${info.fps} fps · up to ${mbit} Mbit/s · ${encoder}`;
   $("share-info").hidden = false;
-});
+  return true;
+}
+
+$("share-start").addEventListener("click", startShare);
+
+// Changing the quality while sharing restarts the share with the new values.
+for (const id of ["share-height", "share-fps"]) {
+  $(id).addEventListener("change", async () => {
+    settings.save({ shareHeight: $("share-height").value, shareFps: $("share-fps").value });
+    if ($("share-stop").hidden) return;
+    await run(() => invoke("stop_share"));
+    if (!(await startShare())) {
+      $("share-start").hidden = false;
+      $("share-stop").hidden = true;
+      $("share-info").hidden = true;
+    }
+  });
+}
 
 $("share-stop").addEventListener("click", async () => {
   await run(() => invoke("stop_share"));
@@ -1089,6 +1115,8 @@ async function init() {
   document.querySelector(`input[name=mode][value=${mode}]`).checked = true;
   await invoke("set_voice_mode", { mode });
   if (saved.pttKey) await run(() => invoke("set_ptt_key", { key: saved.pttKey }));
+  if (saved.shareHeight) $("share-height").value = saved.shareHeight;
+  if (saved.shareFps) $("share-fps").value = saved.shareFps;
   const threshold = saved.vaThreshold ?? -50;
   $("va-threshold").value = String(threshold);
   showThreshold(threshold);

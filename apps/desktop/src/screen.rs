@@ -28,7 +28,7 @@ use livekit::webrtc::prelude::{
 use livekit::webrtc::rtp_parameters::DegradationPreference;
 use livekit::webrtc::video_frame::{EncodedFrameType, EncodedVideoCodec, EncodedVideoFrame};
 use livekit::webrtc::video_source::native::NativeVideoSource;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 use tinlink_hwenc::HardwareEncoder;
 use tokio::sync::oneshot;
@@ -36,26 +36,45 @@ use tokio::sync::oneshot;
 use crate::border::ShareBorder;
 use crate::viewer::fit;
 
-/// Size, frame rate and bitrate cap of one way of encoding.
-#[derive(Debug, Clone, Copy)]
-struct Profile {
-    /// Larger screens are scaled down to fit, keeping the aspect ratio.
-    max_size: (u32, u32),
-    fps: u32,
-    max_bitrate: u32,
+/// What the user picked for a share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareSettings {
+    /// Scale down to at most this height (keeping the aspect ratio); `None`
+    /// keeps the native resolution. Never scales up.
+    pub max_height: Option<u32>,
+    pub fps: u32,
 }
 
-const HARDWARE: Profile = Profile {
-    max_size: (2560, 1440),
-    fps: 60,
-    max_bitrate: 12_000_000,
-};
+/// Software H.264 (OpenH264) cannot keep up beyond this.
+const SOFTWARE_MAX_HEIGHT: u32 = 1080;
+const SOFTWARE_MAX_FPS: u32 = 30;
+/// Bits per pixel and frame; screen content compresses well.
+const BITS_PER_PIXEL: f64 = 0.06;
+const MIN_BITRATE: u32 = 1_500_000;
+const MAX_BITRATE: u32 = 20_000_000;
 
-const SOFTWARE: Profile = Profile {
-    max_size: (1920, 1080),
-    fps: 30,
-    max_bitrate: 6_000_000,
-};
+/// Size, frame rate and bitrate a share actually runs with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Plan {
+    size: (u32, u32),
+    fps: u32,
+    bitrate: u32,
+}
+
+/// Applies the user's choice and the encoder's limits to the screen size.
+fn plan(input: (u32, u32), settings: ShareSettings, hardware: bool) -> Plan {
+    let mut max_height = settings.max_height.unwrap_or(u32::MAX);
+    let mut fps = settings.fps.clamp(1, 60);
+    if !hardware {
+        max_height = max_height.min(SOFTWARE_MAX_HEIGHT);
+        fps = fps.min(SOFTWARE_MAX_FPS);
+    }
+    let size = output_size(input, max_height);
+    let bits = f64::from(size.0) * f64::from(size.1) * f64::from(fps) * BITS_PER_PIXEL;
+    let bitrate = (bits as u32).clamp(MIN_BITRATE, MAX_BITRATE);
+    Plan { size, fps, bitrate }
+}
 
 #[derive(Serialize)]
 pub struct ScreenSource {
@@ -74,6 +93,7 @@ pub struct ShareInfo {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    pub bitrate_bps: u32,
 }
 
 fn capturer() -> Option<DesktopCapturer> {
@@ -114,7 +134,12 @@ pub struct ScreenShare {
 type Ready = Result<(NativeVideoSource, ShareInfo)>;
 
 impl ScreenShare {
-    pub async fn start(app: &AppHandle, room: &Room, source_id: Option<u64>) -> Result<Self> {
+    pub async fn start(
+        app: &AppHandle,
+        room: &Room,
+        source_id: Option<u64>,
+        settings: ShareSettings,
+    ) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = oneshot::channel();
         let thread = {
@@ -125,7 +150,7 @@ impl ScreenShare {
                 .spawn(move || {
                     // The video source spawns a keepalive task on creation.
                     let _rt = rt.enter();
-                    capture_thread(source_id, stop, ready_tx)
+                    capture_thread(source_id, settings, stop, ready_tx)
                 })?
         };
         let (source, info) = match tokio::time::timeout(Duration::from_secs(5), ready_rx).await {
@@ -138,11 +163,6 @@ impl ScreenShare {
         };
         tracing::info!(?info, "publishing screen share");
 
-        let profile = if info.encoder.is_some() {
-            HARDWARE
-        } else {
-            SOFTWARE
-        };
         let track = LocalVideoTrack::create_video_track("screen", RtcVideoSource::Native(source));
         let published = room
             .local_participant()
@@ -157,8 +177,8 @@ impl ScreenShare {
                         VideoEncoderBackend::Auto
                     },
                     video_encoding: Some(VideoEncoding {
-                        max_bitrate: u64::from(profile.max_bitrate),
-                        max_framerate: f64::from(profile.fps),
+                        max_bitrate: u64::from(info.bitrate_bps),
+                        max_framerate: f64::from(info.fps),
                     }),
                     // One full-quality layer; simulcast comes with more viewers.
                     simulcast: false,
@@ -204,8 +224,13 @@ impl ScreenShare {
 }
 
 /// Owns the capturer (it must stay on one thread) and paces capture at the
-/// frame rate the chosen encoder profile allows.
-fn capture_thread(source_id: Option<u64>, stop: Arc<AtomicBool>, ready_tx: oneshot::Sender<Ready>) {
+/// frame rate of the plan.
+fn capture_thread(
+    source_id: Option<u64>,
+    settings: ShareSettings,
+    stop: Arc<AtomicBool>,
+    ready_tx: oneshot::Sender<Ready>,
+) {
     let Some(mut capturer) = capturer() else {
         let _ = ready_tx.send(Err(anyhow!("screen capture is not available")));
         return;
@@ -221,9 +246,10 @@ fn capture_thread(source_id: Option<u64>, stop: Arc<AtomicBool>, ready_tx: onesh
     };
     tracing::info!(%source, "starting screen capture");
 
-    // Until the first frame decided the encoder, capture at the higher rate.
-    let fps = Arc::new(AtomicU32::new(HARDWARE.fps));
+    // Until the first frame decided the plan, capture at the chosen rate.
+    let fps = Arc::new(AtomicU32::new(settings.fps.max(1)));
     let mut sink = FrameSink {
+        settings,
         output: None,
         ready_tx: Some(ready_tx),
         epoch: Instant::now(),
@@ -259,6 +285,7 @@ enum Output {
         encoder: HardwareEncoder,
         source: NativeVideoSource,
         size: (u32, u32),
+        max_bitrate: u32,
     },
     Software {
         source: NativeVideoSource,
@@ -267,6 +294,7 @@ enum Output {
 }
 
 struct FrameSink {
+    settings: ShareSettings,
     output: Option<Output>,
     ready_tx: Option<oneshot::Sender<Ready>>,
     epoch: Instant,
@@ -274,11 +302,11 @@ struct FrameSink {
     fps: Arc<AtomicU32>,
 }
 
-/// Fits the frame into `max` and rounds down to even dimensions (needed by
-/// the 4:2:0 formats).
-fn output_size((width, height): (u32, u32), max: (u32, u32)) -> (u32, u32) {
-    let (w, h) = if width > max.0 || height > max.1 {
-        fit((width, height), max)
+/// Scales the frame down to `max_height` (keeping the aspect ratio, never
+/// up) and rounds down to even dimensions (needed by the 4:2:0 formats).
+fn output_size((width, height): (u32, u32), max_height: u32) -> (u32, u32) {
+    let (w, h) = if height > max_height {
+        fit((width, height), (u32::MAX, max_height))
     } else {
         (width, height)
     };
@@ -321,12 +349,13 @@ impl FrameSink {
                 encoder,
                 source,
                 size,
+                max_bitrate,
             }) => {
                 if source.take_keyframe_request() {
                     encoder.request_keyframe();
                 }
                 if let Some(rate) = source.take_rate_control_request() {
-                    let bps = rate.target_bitrate_bps.min(u64::from(HARDWARE.max_bitrate));
+                    let bps = rate.target_bitrate_bps.min(u64::from(*max_bitrate));
                     encoder.set_bitrate(bps as u32);
                 }
                 let nv12 = to_nv12(&frame, input, *size);
@@ -348,7 +377,8 @@ impl FrameSink {
     /// Starts the hardware encoder if there is one, else falls back to
     /// software encoding, and reports the result to [`ScreenShare::start`].
     fn choose_output(&mut self, input: (u32, u32), area: (i32, i32, u32, u32)) -> Output {
-        let size = output_size(input, HARDWARE.max_size);
+        let hw = plan(input, self.settings, true);
+        let size = hw.size;
         let resolution = VideoResolution {
             width: size.0,
             height: size.1,
@@ -358,8 +388,8 @@ impl FrameSink {
         let config = tinlink_hwenc::Config {
             width: size.0,
             height: size.1,
-            fps: HARDWARE.fps,
-            bitrate_bps: HARDWARE.max_bitrate,
+            fps: hw.fps,
+            bitrate_bps: hw.bitrate,
         };
         let started = HardwareEncoder::start(config, move |frame| {
             sink.capture_encoded_frame(&EncodedVideoFrame {
@@ -378,26 +408,29 @@ impl FrameSink {
         });
         let (output, info) = match started {
             Ok(encoder) => {
-                self.fps.store(HARDWARE.fps, Ordering::Relaxed);
+                self.fps.store(hw.fps, Ordering::Relaxed);
                 let info = ShareInfo {
                     encoder: Some(encoder.name().to_owned()),
                     area,
                     width: size.0,
                     height: size.1,
-                    fps: HARDWARE.fps,
+                    fps: hw.fps,
+                    bitrate_bps: hw.bitrate,
                 };
                 (
                     Output::Hardware {
                         encoder,
                         source,
                         size,
+                        max_bitrate: hw.bitrate,
                     },
                     info,
                 )
             }
             Err(e) => {
                 tracing::info!("no hardware encoding ({e}), using software H.264");
-                let size = output_size(input, SOFTWARE.max_size);
+                let sw = plan(input, self.settings, false);
+                let size = sw.size;
                 let source = NativeVideoSource::new(
                     VideoResolution {
                         width: size.0,
@@ -405,13 +438,14 @@ impl FrameSink {
                     },
                     true,
                 );
-                self.fps.store(SOFTWARE.fps, Ordering::Relaxed);
+                self.fps.store(sw.fps, Ordering::Relaxed);
                 let info = ShareInfo {
                     encoder: None,
                     area,
                     width: size.0,
                     height: size.1,
-                    fps: SOFTWARE.fps,
+                    fps: sw.fps,
+                    bitrate_bps: sw.bitrate,
                 };
                 (Output::Software { source, size }, info)
             }
@@ -492,14 +526,54 @@ fn to_nv12(frame: &DesktopFrame, input: (u32, u32), (width, height): (u32, u32))
 
 #[cfg(test)]
 mod tests {
-    use super::output_size;
+    use super::*;
 
     #[test]
-    fn output_size_fits_and_is_even() {
-        assert_eq!(output_size((3840, 2160), (2560, 1440)), (2560, 1440));
-        assert_eq!(output_size((1920, 1080), (2560, 1440)), (1920, 1080));
-        assert_eq!(output_size((1365, 767), (2560, 1440)), (1364, 766));
-        // Ultrawide: limited by width.
-        assert_eq!(output_size((5120, 1440), (2560, 1440)), (2560, 720));
+    fn output_size_scales_down_by_height_only() {
+        assert_eq!(output_size((3840, 2160), 1440), (2560, 1440));
+        assert_eq!(
+            output_size((1920, 1080), 1440),
+            (1920, 1080),
+            "never upscale"
+        );
+        assert_eq!(
+            output_size((1365, 767), u32::MAX),
+            (1364, 766),
+            "even sizes"
+        );
+        // Ultrawide keeps its shape.
+        assert_eq!(output_size((5120, 1440), 1080), (3840, 1080));
+    }
+
+    #[test]
+    fn plan_applies_choice_and_encoder_limits() {
+        let native60 = ShareSettings {
+            max_height: None,
+            fps: 60,
+        };
+        let hw = plan((3840, 2160), native60, true);
+        assert_eq!((hw.size, hw.fps), ((3840, 2160), 60));
+        assert_eq!(hw.bitrate, MAX_BITRATE, "4K60 hits the cap");
+        // Software encoding is limited to 1080p30.
+        let sw = plan((3840, 2160), native60, false);
+        assert_eq!((sw.size, sw.fps), ((1920, 1080), 30));
+
+        let small = ShareSettings {
+            max_height: Some(720),
+            fps: 15,
+        };
+        let p720 = plan((2560, 1440), small, true);
+        assert_eq!((p720.size, p720.fps), ((1280, 720), 15));
+        assert_eq!(p720.bitrate, MIN_BITRATE, "small and slow hits the floor");
+
+        let p1440 = plan(
+            (3840, 2160),
+            ShareSettings {
+                max_height: Some(1440),
+                fps: 60,
+            },
+            true,
+        );
+        assert_eq!(p1440.bitrate, 13_271_040);
     }
 }

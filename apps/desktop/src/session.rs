@@ -17,7 +17,7 @@ use tokio::task::JoinHandle;
 use crate::AppState;
 use crate::audio::AudioPrefs;
 use crate::mic::{MicHooks, MicMonitor};
-use crate::screen::{ScreenShare, ShareInfo};
+use crate::screen::{ScreenShare, ShareInfo, ShareSettings};
 use crate::stats::{self, LinkStats};
 use crate::viewer::Viewer;
 use crate::voice::Voice;
@@ -291,10 +291,14 @@ impl Session {
         Ok(())
     }
 
-    pub async fn start_share(&mut self, source_id: Option<u64>) -> Result<ShareInfo> {
+    pub async fn start_share(
+        &mut self,
+        source_id: Option<u64>,
+        settings: ShareSettings,
+    ) -> Result<ShareInfo> {
         let share = match self.share.take() {
             Some(share) => share,
-            None => ScreenShare::start(&self.app, &self.room, source_id).await?,
+            None => ScreenShare::start(&self.app, &self.room, source_id, settings).await?,
         };
         let info = share.info().clone();
         self.share = Some(share);
