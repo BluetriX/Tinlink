@@ -3,9 +3,13 @@
 
 {$TINLINK_DOMAIN} {
 	encode zstd gzip
-	reverse_proxy /api/* server:8080
-	reverse_proxy /health server:8080
 	# LiveKit signaling (WebSocket), so one domain and certificate suffice.
 	# Media itself uses UDP 50000-50100 and TCP 7881 directly.
-	reverse_proxy /rtc* livekit:7880
+	handle /rtc* {
+		reverse_proxy livekit:7880
+	}
+	# API, gateway and the web client.
+	handle {
+		reverse_proxy server:8080
+	}
 }

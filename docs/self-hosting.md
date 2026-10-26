@@ -82,6 +82,10 @@ curl https://chat.example.org/api/info
 
 ## Connecting clients
 
+The web client is served at `https://chat.example.org/`; it needs nothing but a
+current browser (Chrome, Edge, Firefox or Safari). Push-to-talk works there only
+while the tab has focus.
+
 In the desktop app enter the server as `chat.example.org` (or
 `https://chat.example.org`). The first account can always be registered; it
 creates a group and invites others with the "Invite" button.

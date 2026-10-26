@@ -51,6 +51,7 @@ pub fn config() -> Config {
         files_dir: std::env::temp_dir().join(format!("tinlink-test-{}", uuid::Uuid::now_v7())),
         max_upload_bytes: 1024 * 1024,
         source_url: "https://example.org/tinlink".into(),
+        web_dir: None,
     }
 }
 

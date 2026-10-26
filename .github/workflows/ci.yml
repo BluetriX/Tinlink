@@ -12,6 +12,15 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      # Vendored JavaScript must match the pinned upstream release.
+      - run: cd apps/web/vendor && sha256sum -c SHA256SUMS
+      - run: node --check apps/web/app.js && node --check apps/web/level-worklet.js
+      - run: node --test apps/web/tests/*.test.js
+
   rust:
     runs-on: ubuntu-latest
     services:

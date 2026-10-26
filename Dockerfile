@@ -10,5 +10,6 @@ RUN mkdir -p /data/files
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /src/target/release/tinlink-server /usr/local/bin/tinlink-server
 COPY --from=build --chown=65532:65532 /data /data
+COPY --from=build /src/apps/web /app/web
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/tinlink-server"]

@@ -15,11 +15,14 @@ A Discord / TeamSpeak replacement with a focus on **low latency**.
   move). Self-hosted with Docker Compose, see [docs/self-hosting.md](docs/self-hosting.md).
 - **Windows client:** a native app (one portable `.exe`) with chat, voice
   (push-to-talk or voice activation) and screen sharing with GPU encoding.
+- **Web client:** served by the server itself at `https://<your domain>/`, for
+  Linux, macOS and anyone without the Windows app: chat, voice and screen sharing
+  in the browser.
 - **Latency** (measured on a local network): about 60–70 ms glass to glass for
   screen sharing at 1440p60, 2.7 ms of it for hardware encoding on an RTX 3070;
   audio roughly 60–90 ms mouth to ear.
-- **Not yet:** macOS, mobile and web clients, federation, end-to-end encryption,
-  installer and code signing, mentions and message search.
+- **Not yet:** native macOS and mobile clients, federation, end-to-end encryption,
+  installer and code signing, message search.
 
 ## Quick start
 
@@ -32,7 +35,8 @@ A Discord / TeamSpeak replacement with a focus on **low latency**.
    is preinstalled; "N" editions also need the Media Feature Pack. It is not
    signed yet, so Windows SmartScreen asks once ("More info" → "Run anyway").
 3. Start it, enter your server's domain and create an account. The first account
-   creates a group and invites others with the "Invite" button.
+   creates a group and invites others with the "Invite" button. Without the
+   Windows app, open `https://<your domain>/` in a browser instead.
 
 ## Goals
 
@@ -51,7 +55,8 @@ A Discord / TeamSpeak replacement with a focus on **low latency**.
 | Server (REST, WebSocket gateway, permissions) | Rust, axum, PostgreSQL |
 | Media (voice, screen sharing) | [LiveKit](https://livekit.io) SFU, WebRTC over UDP |
 | Desktop client (Windows first, then macOS) | Tauri 2, media in the Rust core via the LiveKit Rust SDK, static HTML/JS UI |
-| Web / mobile client (later) | to be decided |
+| Web client | static HTML/JS served by the server, vendored livekit-client |
+| Mobile client (later) | to be decided |
 | Reverse proxy, TLS | Caddy |
 
 The server decides who may do what and encodes it into a signed LiveKit token.
@@ -64,6 +69,7 @@ Any JavaScript that is unavoidable is vendored as a single pinned file with a ch
 
 ```
 apps/desktop      desktop client (Tauri 2), media in the Rust core via the LiveKit SDK
+apps/web          web client (static files, no build step)
 crates/hwenc      hardware H.264 encoding via Media Foundation (Windows)
 crates/winput     listen-only keyboard and mouse state for push-to-talk (Windows)
 crates/protocol   shared types: federated user ids, permission model
@@ -195,6 +201,25 @@ Rules worth knowing:
 - Registration is open by default; set `TINLINK_OPEN_REGISTRATION=false` to allow
   only the first account.
 
+## Web client
+
+`apps/web` is a browser client without a build step: plain HTML, CSS and ES
+modules plus one vendored, checksummed copy of
+[livekit-client](apps/web/vendor/README.md). The server serves it from
+`TINLINK_WEB_DIR` (default `/app/web`, which the Docker image contains) with a
+strict Content Security Policy, so it is reachable at `https://<your domain>/`
+and talks to the API on the same origin.
+
+It covers what the desktop client does (chat with unread markers, @mentions
+with notifications, edit and delete, uploads, voice with push-to-talk or voice
+activation and an adjustable threshold, per-person volume, screen sharing with
+selectable resolution and frame rate, moderation, password change), with two
+browser limits: push-to-talk only works while the tab has focus, and screen
+sharing uses the browser's encoder. `LIVEKIT_PUBLIC_URL` must be a `wss://` URL,
+since an HTTPS page may not open plain WebSocket connections.
+
+Tests of the pure logic run with `node --test apps/web/tests/*.test.js`.
+
 ## Desktop client
 
 `apps/desktop` is a client for the server above: log in or create an account,
@@ -302,9 +327,9 @@ plays the other's microphone back into the shared microphone.
 1. Media prototype: Windows desktop client joins a room, push-to-talk, screen sharing; measure latency (done)
 2. Core server: accounts, groups, channels, chat, live events over WebSocket (done)
 3. Permissions: roles, overwrites, user-created channels with limits, voice moderation (done)
-4. Files and polish: uploads and image previews (done), Windows client for the server (done), mentions, installer
+4. Files and polish: uploads and image previews (done), Windows client for the server (done), mentions and unread markers (done), web client (done), installer
 5. Lower latency: 10 ms Opus frames, a GPU-only capture path without CPU colour conversion
-6. More platforms: macOS, then web and mobile
+6. More platforms: native macOS, then mobile
 7. Optional: end-to-end encryption, federation
 
 ## License

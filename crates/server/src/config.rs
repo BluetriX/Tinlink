@@ -21,6 +21,8 @@ pub struct Config {
     pub max_upload_bytes: usize,
     /// Where users can get the source code of this server (AGPL section 13).
     pub source_url: String,
+    /// Static files of the web client, served at `/` when the directory exists.
+    pub web_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -64,6 +66,11 @@ impl Config {
                 * 1024,
             source_url: optional("TINLINK_SOURCE_URL")
                 .unwrap_or_else(|| env!("CARGO_PKG_REPOSITORY").into()),
+            web_dir: Some(
+                optional("TINLINK_WEB_DIR")
+                    .unwrap_or_else(|| "/app/web".into())
+                    .into(),
+            ),
         })
     }
 }

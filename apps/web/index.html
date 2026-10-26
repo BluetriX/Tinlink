@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tinlink</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Login -->
+  <main id="login-view" class="center" hidden>
+    <form id="login-form" class="card">
+      <h1>Tinlink</h1>
+      <p id="server-name" class="muted"></p>
+      <label>User name <input id="login-name" required maxlength="32" autocomplete="username"></label>
+      <label id="display-name-row" hidden>Display name <input id="login-display" maxlength="64"></label>
+      <label>Password <input id="login-password" type="password" required autocomplete="current-password"></label>
+      <div class="row">
+        <button id="login-submit" type="submit">Log in</button>
+        <button id="login-toggle" type="button" class="link">Create an account</button>
+      </div>
+      <p id="login-error" class="error" role="alert"></p>
+      <p class="hint"><a id="source-link" href="https://github.com/BluetriX/Tinlink" target="_blank" rel="noopener">Source code</a></p>
+    </form>
+  </main>
+
+  <!-- Main -->
+  <main id="main-view" hidden>
+    <nav id="groups" aria-label="Groups">
+      <ul id="group-list"></ul>
+      <button id="group-add" type="button" class="round" title="Create or join a group">+</button>
+    </nav>
+
+    <aside id="sidebar">
+      <header class="bar">
+        <strong id="group-name">No group</strong>
+        <button id="group-invite" type="button" class="small" hidden title="Create an invite code">Invite</button>
+      </header>
+      <div id="channel-tree"></div>
+
+      <section id="voice-panel">
+        <div id="voice-status" class="muted">Not in voice</div>
+        <div class="row">
+          <button id="voice-leave" type="button" class="small" hidden>Leave</button>
+          <button id="share-start" type="button" class="small" hidden>Share screen</button>
+          <button id="share-stop" type="button" class="small" hidden>Stop sharing</button>
+          <button id="audio-start" type="button" class="small" hidden>Enable audio</button>
+        </div>
+        <div id="share-info" class="share-info" hidden></div>
+        <div id="tx" class="tx" hidden>not transmitting</div>
+        <div id="muted-hint" class="muted-hint" hidden>You are talking, but nobody hears you (push-to-talk not held or muted).</div>
+        <ul id="participants"></ul>
+        <details id="voice-settings">
+          <summary>Voice settings</summary>
+          <label class="inline"><input type="radio" name="mode" value="pushToTalk" checked> Push to talk</label>
+          <label class="inline"><input type="radio" name="mode" value="voiceActivation"> Voice activation</label>
+          <div class="row">
+            <label>PTT key <input id="ptt-key" value="F8" size="12" readonly></label>
+            <button id="ptt-record" type="button" class="small" title="Press the key or mouse button to use">Record</button>
+          </div>
+          <p class="hint">In the browser, push-to-talk only works while this tab has the focus.</p>
+          <label>Voice activation level <input id="va-threshold" type="range" min="-80" max="-10" step="1" value="-50"></label>
+          <div class="level"><div class="fill" id="level-fill"></div><div class="mark" id="level-mark"></div></div>
+          <label>Microphone <select id="input-device"></select></label>
+          <label>Output <select id="output-device"></select></label>
+          <div class="row">
+            <label>Share resolution
+              <select id="share-resolution">
+                <option value="0">Native</option>
+                <option value="1440">1440p</option>
+                <option value="1080" selected>1080p</option>
+                <option value="720">720p</option>
+              </select>
+            </label>
+            <label>Max fps
+              <select id="share-fps">
+                <option value="60">60</option>
+                <option value="30" selected>30</option>
+                <option value="15">15</option>
+              </select>
+            </label>
+          </div>
+        </details>
+      </section>
+
+      <footer class="bar">
+        <button id="me" type="button" class="link ellipsis" title="Account"></button>
+        <span id="gateway-dot" class="dot" title="Live updates"></span>
+        <button id="logout" type="button" class="small">Log out</button>
+      </footer>
+    </aside>
+
+    <section id="chat">
+      <header class="bar"><strong id="channel-name">Select a channel</strong></header>
+      <div id="stage"></div>
+      <div id="messages" aria-live="polite"></div>
+      <ul id="autocomplete" hidden></ul>
+      <form id="composer" hidden>
+        <button id="attach" type="button" class="small" title="Attach files">Attach</button>
+        <input id="file-input" type="file" multiple hidden>
+        <textarea id="message-input" rows="1" placeholder="Message" maxlength="4000"></textarea>
+        <button type="submit">Send</button>
+      </form>
+      <div id="pending-files" class="muted"></div>
+    </section>
+  </main>
+
+  <p id="status" role="status"></p>
+  <div id="audio-sink" hidden></div>
+
+  <dialog id="dialog">
+    <form method="dialog" id="dialog-form">
+      <h2 id="dialog-title"></h2>
+      <div id="dialog-body"></div>
+      <p id="dialog-error" class="error"></p>
+      <div class="row end">
+        <button value="cancel" type="button" id="dialog-cancel">Cancel</button>
+        <button value="ok" type="submit" id="dialog-ok">OK</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="vendor/livekit-client-2.22.4.umd.js"></script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
