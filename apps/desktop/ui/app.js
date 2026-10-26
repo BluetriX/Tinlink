@@ -126,7 +126,9 @@ function ask({ title, fields = [], text, ok = "OK", cancel = true, submit }) {
       ev.preventDefault();
       const values = {};
       for (const [id, input] of Object.entries(inputs)) {
-        values[id] = input.type === "checkbox" ? input.checked : input.value.trim();
+        values[id] = input.type === "checkbox"
+          ? input.checked
+          : input.type === "password" ? input.value : input.value.trim();
       }
       if (submit) {
         $("dialog-ok").disabled = true;
@@ -231,6 +233,7 @@ async function showMain(account) {
     ? `${account.user.display_name || account.user.name} @ ${new URL(account.server).host}`
     : "Developer mode";
   $("groups").hidden = !account;
+  $("change-password").hidden = !account;
   $("logout").textContent = account ? "Log out" : "Back";
   await loadScreens();
   if (!account) return;
@@ -259,13 +262,92 @@ async function loadGroups() {
 
 function renderGroups() {
   $("group-list").replaceChildren(...state.groups.map((g) => el("li", {},
+    g.unread && g.id !== state.group?.id ? el("span", { class: "unread-dot" }) : null,
     el("button", {
       type: "button",
       class: g.id === state.group?.id ? "active" : "",
       title: g.name,
       textContent: initials(g.name),
       onclick: () => selectGroup(g.id),
-    }))));
+    }),
+    g.mention_count ? el("span", { class: "mention-badge", textContent: String(g.mention_count) }) : null)));
+}
+
+// ------------------------------------------------------- read state
+
+const myId = () => state.account?.user.id;
+const channelById = (id) => state.channels.find((c) => c.id === id);
+/** UUIDv7 ids are time ordered, so string comparison orders them. */
+const isUnread = (ch) => !!ch.last_message_id && (!ch.last_read_id || ch.last_message_id > ch.last_read_id);
+
+/** Derives the current group's unread state from its channels. */
+function updateGroupBadges() {
+  const g = state.groups.find((x) => x.id === state.group?.id);
+  if (g) {
+    g.unread = state.channels.some(isUnread);
+    g.mention_count = state.channels.reduce((n, c) => n + (c.mention_count || 0), 0);
+  }
+  renderGroups();
+}
+
+let readTimer = null;
+/** Marks the open channel read shortly after it is seen with focus. */
+function scheduleMarkRead() {
+  clearTimeout(readTimer);
+  readTimer = setTimeout(markRead, 600);
+}
+
+async function markRead() {
+  const ch = state.channel;
+  const last = state.messages[state.messages.length - 1];
+  if (!ch || !last || !document.hasFocus()) return;
+  const entry = channelById(ch.id);
+  if (entry && !isUnread(entry) && !entry.mention_count && entry.last_read_id >= last.id) return;
+  try {
+    await api("PUT", `/channels/${ch.id}/read`, { message_id: last.id });
+  } catch {
+    return;
+  }
+  if (entry) {
+    if (!entry.last_message_id || entry.last_message_id < last.id) entry.last_message_id = last.id;
+    entry.last_read_id = last.id;
+    entry.mention_count = 0;
+  }
+  renderTree();
+  updateGroupBadges();
+}
+
+window.addEventListener("focus", scheduleMarkRead);
+
+/** A new message somewhere: unread state, badges and mention notification. */
+function trackNewMessage(e) {
+  const m = e.data;
+  const mine = m.author_id === myId();
+  const mentioned = (m.mentions || []).includes(myId());
+  const seen = m.channel_id === state.channel?.id && document.hasFocus();
+  if (state.group && e.group_id === state.group.id) {
+    const ch = channelById(m.channel_id);
+    if (ch) {
+      if (!ch.last_message_id || ch.last_message_id < m.id) ch.last_message_id = m.id;
+      if (mine) ch.last_read_id = m.id;
+      else if (mentioned && !seen) ch.mention_count = (ch.mention_count || 0) + 1;
+      renderTree();
+    }
+    updateGroupBadges();
+  } else if (!mine) {
+    const g = state.groups.find((x) => x.id === e.group_id);
+    if (g) {
+      g.unread = true;
+      if (mentioned) g.mention_count = (g.mention_count || 0) + 1;
+      renderGroups();
+    }
+  }
+  if (mentioned && !mine && !seen) {
+    const ch = channelById(m.channel_id);
+    const where = ch ? `#${ch.name}` : state.groups.find((x) => x.id === e.group_id)?.name || "Tinlink";
+    const body = m.content || (m.attachments?.length ? "sent a file" : "");
+    invoke("notify", { title: `${m.author_name || "Someone"} mentioned you in ${where}`, body: body.slice(0, 200) });
+  }
 }
 
 function initials(name) {
@@ -333,6 +415,7 @@ function setChannels(list) {
   state.channels = (list?.channels || []).sort((a, b) => a.position - b.position || a.name.localeCompare(b.name));
   state.voice = list?.voice || [];
   renderTree();
+  updateGroupBadges();
 }
 
 /** Reloads channels and members of the current group (debounced). */
@@ -388,12 +471,14 @@ function renderTree() {
 
 function channelNodes(ch) {
   const canJoin = ch.voice_enabled && can(ch.permissions, "CONNECT");
-  const row = el("div", { class: `channel${ch.id === state.channel?.id ? " active" : ""}` },
+  const classes = ["channel", ch.id === state.channel?.id && "active", isUnread(ch) && "unread"];
+  const row = el("div", { class: classes.filter(Boolean).join(" ") },
     el("button", {
       type: "button", class: "name", title: ch.name,
       textContent: `# ${ch.name}${ch.temporary ? " ⏱" : ""}`,
       onclick: () => openChannel(ch),
     }),
+    ch.mention_count ? el("span", { class: "mention-badge", textContent: String(ch.mention_count) }) : null,
     canJoin ? el("button", {
       type: "button", class: "join", title: "Join voice", textContent: "🔊",
       onclick: () => joinVoice(ch),
@@ -513,6 +598,7 @@ async function loadMessages(before) {
     state.messages = page;
     box.replaceChildren(...page.map(renderMessage));
     box.scrollTop = box.scrollHeight;
+    scheduleMarkRead();
   }
 }
 
@@ -537,13 +623,59 @@ function formatSize(bytes) {
 }
 
 function renderMessage(m) {
-  const node = el("div", { class: "message", dataset: { id: m.id } },
+  const mine = m.author_id === myId();
+  const mentionsMe = (m.mentions || []).includes(myId());
+  const canDelete = mine || can(state.channel?.permissions, "MANAGE_MESSAGES");
+  const node = el("div", { class: `message${mentionsMe ? " mentions-me" : ""}`, dataset: { id: m.id } },
     el("div", { class: "meta" },
       el("strong", { textContent: m.author_name || "deleted user" }),
       el("span", { textContent: formatTime(m.created_at) + (m.edited_at ? " (edited)" : "") })),
     m.content ? el("div", { class: "text", textContent: m.content }) : null,
     ...(m.attachments || []).map(renderAttachment));
+  if (mine || canDelete) {
+    node.append(el("span", { class: "actions" },
+      mine ? el("button", { type: "button", class: "small", textContent: "Edit", onclick: () => editMessage(m, node) }) : null,
+      canDelete ? el("button", { type: "button", class: "small", textContent: "Delete", onclick: () => deleteMessage(m) }) : null));
+  }
   return node;
+}
+
+function editMessage(m, node) {
+  if (node.querySelector(".edit-box")) return;
+  const box = el("textarea", { class: "edit-box", rows: 2, value: m.content, maxLength: 4000 });
+  const save = async () => {
+    const content = box.value.trim();
+    if (!content || content === m.content) return replaceMessage(m);
+    const updated = await run(() => api("PATCH", `/channels/${m.channel_id}/messages/${m.id}`, { content }));
+    if (updated) replaceMessage(updated);
+  };
+  box.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && !ev.shiftKey) {
+      ev.preventDefault();
+      save();
+    } else if (ev.key === "Escape") {
+      replaceMessage(m);
+    }
+  });
+  const form = el("div", {}, box,
+    el("div", { class: "row" },
+      el("button", { type: "button", class: "small primary", textContent: "Save", onclick: save }),
+      el("button", { type: "button", class: "small", textContent: "Cancel", onclick: () => replaceMessage(m) }),
+      el("span", { class: "muted", textContent: "Enter to save, Escape to cancel" })));
+  const text = node.querySelector(".text");
+  if (text) text.replaceWith(form);
+  else node.querySelector(".meta").after(form);
+  box.focus();
+}
+
+async function deleteMessage(m) {
+  const confirmed = await ask({
+    title: "Delete message?",
+    text: m.content ? `"${m.content.slice(0, 120)}"` : "This message and its files will be deleted.",
+    ok: "Delete",
+  });
+  if (!confirmed) return;
+  if ((await run(() => api("DELETE", `/channels/${m.channel_id}/messages/${m.id}`))) !== undefined) removeMessage(m.id);
 }
 
 function renderAttachment(a) {
@@ -575,6 +707,7 @@ function addMessage(m) {
   state.messages.push(m);
   box.append(renderMessage(m));
   if (atBottom) box.scrollTop = box.scrollHeight;
+  scheduleMarkRead();
 }
 
 function replaceMessage(m) {
@@ -602,11 +735,95 @@ function renderPending() {
     : "";
 }
 
+// @-autocomplete for member names in the message input.
+const mentionPicker = { items: [], index: 0, start: -1 };
+
+function updateMentionPicker() {
+  const input = $("message-input");
+  const caret = input.selectionStart;
+  const match = /(^|[^A-Za-z0-9_.-])@([A-Za-z0-9_.-]{0,32})$/.exec(input.value.slice(0, caret));
+  if (!match) return hideMentionPicker();
+  const query = match[2].toLowerCase();
+  mentionPicker.start = caret - query.length - 1;
+  mentionPicker.items = [...state.members.values()]
+    .filter((m) => m.user_id !== myId())
+    .filter((m) => m.name.toLowerCase().startsWith(query) || (m.display_name || "").toLowerCase().startsWith(query))
+    .slice(0, 6);
+  mentionPicker.index = 0;
+  if (!mentionPicker.items.length) return hideMentionPicker();
+  renderMentionPicker();
+}
+
+function renderMentionPicker() {
+  $("autocomplete").replaceChildren(...mentionPicker.items.map((m, i) => el("li", {
+    class: i === mentionPicker.index ? "selected" : "",
+    onmousedown: (ev) => {
+      ev.preventDefault();
+      chooseMention(m);
+    },
+  }, m.display_name || m.name, el("span", { class: "handle", textContent: `@${m.name}` }))));
+  $("autocomplete").hidden = false;
+}
+
+function hideMentionPicker() {
+  $("autocomplete").hidden = true;
+  mentionPicker.items = [];
+}
+
+function chooseMention(m) {
+  const input = $("message-input");
+  const caret = input.selectionStart;
+  const inserted = `@${m.name} `;
+  input.value = input.value.slice(0, mentionPicker.start) + inserted + input.value.slice(caret);
+  const pos = mentionPicker.start + inserted.length;
+  input.setSelectionRange(pos, pos);
+  hideMentionPicker();
+  input.focus();
+}
+
+$("message-input").addEventListener("input", updateMentionPicker);
+$("message-input").addEventListener("blur", () => setTimeout(hideMentionPicker, 100));
 $("message-input").addEventListener("keydown", (ev) => {
+  if (mentionPicker.items.length) {
+    if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
+      ev.preventDefault();
+      const n = mentionPicker.items.length;
+      mentionPicker.index = (mentionPicker.index + (ev.key === "ArrowDown" ? 1 : n - 1)) % n;
+      renderMentionPicker();
+      return;
+    }
+    if (ev.key === "Enter" || ev.key === "Tab") {
+      ev.preventDefault();
+      chooseMention(mentionPicker.items[mentionPicker.index]);
+      return;
+    }
+    if (ev.key === "Escape") {
+      hideMentionPicker();
+      return;
+    }
+  }
   if (ev.key === "Enter" && !ev.shiftKey) {
     ev.preventDefault();
     $("composer").requestSubmit();
   }
+});
+
+$("change-password").addEventListener("click", async () => {
+  const done = await ask({
+    title: "Change password",
+    fields: [
+      { id: "current", label: "Current password", type: "password" },
+      { id: "next", label: "New password (at least 8 characters)", type: "password" },
+      { id: "repeat", label: "Repeat new password", type: "password" },
+    ],
+    ok: "Change",
+    submit: (v) => {
+      if (v.next.length < 8) return "The new password needs at least 8 characters.";
+      if (v.next !== v.repeat) return "The new passwords do not match.";
+      return tryText(() => api("PUT", "/users/me/password", { current_password: v.current, new_password: v.next }));
+    },
+  });
+  if (done) setStatus("Password changed; your other sessions were signed out");
 });
 
 $("composer").addEventListener("submit", async (ev) => {
@@ -651,6 +868,7 @@ listen("gateway", (ev) => {
   switch (e.type) {
     case "message_created":
       addMessage(e.data);
+      trackNewMessage(e);
       break;
     case "message_updated":
       replaceMessage(e.data);

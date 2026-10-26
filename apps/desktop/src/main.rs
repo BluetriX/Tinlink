@@ -271,6 +271,32 @@ fn restart_app(app: AppHandle) {
     app.restart();
 }
 
+/// Shows a Windows notification (e.g. for a mention) and flashes the
+/// taskbar button until the window is focused.
+#[tauri::command]
+fn notify(app: AppHandle, title: String, body: String) {
+    tracing::debug!(%title, "notification");
+    // The portable exe has no registered app id of its own; toasts need one
+    // that Windows knows, so they appear under PowerShell's (as
+    // notify-rust does for unpackaged apps).
+    #[cfg(windows)]
+    {
+        use tauri_winrt_notification::Toast;
+        let shown = Toast::new(Toast::POWERSHELL_APP_ID)
+            .title(&title)
+            .text1(&body)
+            .show();
+        if let Err(e) = shown {
+            tracing::warn!("cannot show notification: {e}");
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (title, body);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.request_user_attention(Some(tauri::UserAttentionType::Informational));
+    }
+}
+
 /// Opens the viewer of a participant's screen share again.
 #[tauri::command]
 async fn watch_screen(state: State<'_, AppState>, identity: String) -> CmdResult<()> {
@@ -408,6 +434,7 @@ fn main() {
             set_ptt_key,
             record_ptt_key,
             set_local_mute,
+            notify,
             restart_app,
             watch_screen,
             list_screens,

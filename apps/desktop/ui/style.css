@@ -282,6 +282,7 @@ label.inline input {
 
 .channel .name {
   flex: 1;
+  color: var(--muted);
   text-align: left;
   border: none;
   background: none;
@@ -291,8 +292,45 @@ label.inline input {
   white-space: nowrap;
 }
 
-.channel.active .name {
+.channel.active .name,
+.channel.unread .name {
+  color: var(--fg);
+}
+
+.channel.active .name,
+.channel.unread .name {
   font-weight: 600;
+}
+
+.mention-badge {
+  background: var(--error);
+  color: #fff;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 5px;
+  line-height: 16px;
+}
+
+#group-list li {
+  position: relative;
+}
+
+#group-list .mention-badge {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  border: 2px solid var(--panel-2);
+}
+
+#group-list .unread-dot {
+  position: absolute;
+  left: -8px;
+  top: 18px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--fg);
 }
 
 .channel .join {
@@ -491,6 +529,66 @@ label.inline input {
 .message .meta strong {
   color: var(--fg);
   margin-right: 6px;
+}
+
+.message {
+  position: relative;
+  border-left: 3px solid transparent;
+  padding-left: 6px;
+  margin-left: -9px;
+}
+
+.message.mentions-me {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-left-color: var(--accent);
+}
+
+.message .actions {
+  position: absolute;
+  top: 2px;
+  right: 0;
+  display: none;
+  gap: 4px;
+}
+
+.message:hover .actions {
+  display: flex;
+}
+
+.message .actions button {
+  padding: 0 6px;
+  font-size: 11px;
+}
+
+.message .edit-box {
+  width: 100%;
+  margin-top: 2px;
+}
+
+.autocomplete {
+  list-style: none;
+  margin: 0 16px;
+  padding: 4px 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.autocomplete li {
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.autocomplete li.selected {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.autocomplete .handle {
+  opacity: 0.7;
+  margin-left: 6px;
 }
 
 .message .text {

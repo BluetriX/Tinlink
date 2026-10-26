@@ -199,7 +199,13 @@ Rules worth knowing:
 
 `apps/desktop` is a client for the server above: log in or create an account,
 create groups or join one with an invite code, browse the channel tree,
-chat with history, live updates and file attachments (images inline), see
+chat with history, live updates and file attachments (images inline), edit
+and delete messages (moderators can delete any), @-mention members with
+autocomplete (mentions of you are highlighted), see unread channels in bold
+with mention badges on channels and groups, get a Windows notification and a
+flashing taskbar button for a mention while the window is in the background
+or another channel is open (shown as "Windows PowerShell", because the
+portable exe has no registered app id), change your password, see
 who is in which voice channel, join a channel's voice, and create your own
 (temporary) rooms in the "Rooms" category. Moderators click a member in a
 voice channel to server-mute, disconnect or move them; a moved client follows

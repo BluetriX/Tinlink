@@ -100,6 +100,7 @@
       <footer class="bar">
         <span id="me" class="ellipsis"></span>
         <span id="gateway-dot" class="dot" title="Live updates"></span>
+        <button id="change-password" type="button" class="small" title="Change password">Password</button>
         <button id="logout" type="button" class="small">Log out</button>
       </footer>
     </aside>
@@ -107,6 +108,7 @@
     <section id="chat">
       <header class="bar"><strong id="channel-name">Select a channel</strong></header>
       <div id="messages" aria-live="polite"></div>
+      <ul id="autocomplete" class="autocomplete" hidden></ul>
       <form id="composer" hidden>
         <button id="attach" type="button" class="small" title="Attach files">Attach</button>
         <input id="file-input" type="file" multiple hidden>
