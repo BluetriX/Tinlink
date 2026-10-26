@@ -276,6 +276,10 @@ With `TINLINK_DEVTOOLS_PORT=9222` a debug build opens the WebView's DevTools
 protocol on that port for UI automation. Debug builds accept the self-signed
 certificate of the local stack; release builds do not.
 
+Voice activation transmits while the microphone level is above an adjustable
+threshold (slider with a live level meter in the voice settings) and keeps
+going for half a second after it drops, so word endings are not cut off.
+
 Push-to-talk (default `F8`) only listens: the key still reaches the game or
 whatever program has focus. Any key, `Mouse3`/`Mouse4`/`Mouse5` (middle and side
 buttons) or a combination like `Ctrl+Shift+Space` works; "Record" in the voice

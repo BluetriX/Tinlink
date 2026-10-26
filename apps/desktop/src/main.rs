@@ -5,7 +5,7 @@ mod account;
 mod audio;
 mod backend;
 mod border;
-mod muted_speech;
+mod mic;
 mod ptt;
 mod screen;
 mod session;
@@ -204,9 +204,15 @@ async fn set_audio_device(
     if kind == DeviceKind::Input
         && let Some(session) = state.session.lock().await.as_mut()
     {
-        session.restart_muted_speech(name);
+        session.restart_mic_monitor(name);
     }
     Ok(())
+}
+
+/// Sets the voice activation threshold in dBFS.
+#[tauri::command]
+fn set_va_threshold(state: State<'_, AppState>, db: f32) {
+    state.voice.set_threshold_db(db);
 }
 
 #[tauri::command]
@@ -395,6 +401,7 @@ fn main() {
             account::join_voice,
             leave,
             set_voice_mode,
+            set_va_threshold,
             audio_devices,
             set_audio_device,
             set_ptt_key,

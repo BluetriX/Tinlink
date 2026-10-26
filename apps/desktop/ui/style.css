@@ -402,6 +402,35 @@ label.inline input {
   margin-left: 14px;
 }
 
+.meter {
+  position: relative;
+  height: 8px;
+  margin: -2px 0 10px;
+  border-radius: 4px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  width: 0;
+  background: var(--muted);
+  transition: width 60ms linear;
+}
+
+.meter-fill.open {
+  background: var(--speaking);
+}
+
+.meter-mark {
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  width: 2px;
+  background: var(--accent);
+}
+
 .share-info {
   font-size: 12px;
   color: var(--accent);

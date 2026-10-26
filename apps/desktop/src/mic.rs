@@ -1,5 +1,9 @@
-//! Notices when someone talks while nothing is transmitted (push-to-talk
-//! not held, or muted by a moderator) and asks the UI to play a short beep.
+//! Microphone level monitor for the voice session:
+//!
+//! - opens and closes transmission in voice activation mode ([`Gate`]),
+//! - notices when someone talks while nothing is transmitted (push-to-talk
+//!   not held, or muted by a moderator) and asks the UI to beep ([`Detector`]),
+//! - feeds the level meter in the voice settings.
 //!
 //! WebRTC's audio device module does not expose the microphone level while
 //! the track is disabled, so a separate lightweight capture stream (WASAPI
@@ -25,7 +29,32 @@ const SPEECH_ABOVE_NOISE_DB: f32 = 12.0;
 const MIN_SPEECH_DB: f32 = -50.0;
 /// How fast the noise floor follows a rising level, per update.
 const NOISE_RISE_DB: f32 = 0.05;
-const POLL: Duration = Duration::from_millis(100);
+/// The gate reacts within one poll.
+const POLL: Duration = Duration::from_millis(10);
+/// The detector looks at 100 ms windows.
+const DETECTOR_TICKS: u32 = 10;
+/// Level meter updates for the UI (about 16 per second).
+const LEVEL_TICKS: u32 = 6;
+/// Voice activation keeps transmitting this long after the level drops, so
+/// word endings and short pauses are not cut off.
+const GATE_HANGOVER: Duration = Duration::from_millis(500);
+
+/// Voice activation: open while the level reaches the threshold, plus the
+/// hangover.
+#[derive(Debug, Default)]
+pub struct Gate {
+    open_until: Option<Instant>,
+}
+
+impl Gate {
+    /// Returns whether transmission should be open.
+    pub fn update(&mut self, now: Instant, level_db: f32, threshold_db: f32) -> bool {
+        if level_db >= threshold_db {
+            self.open_until = Some(now + GATE_HANGOVER);
+        }
+        self.open_until.is_some_and(|t| now < t)
+    }
+}
 
 /// Energy-based voice detection plus the "talking while muted" timing.
 #[derive(Debug, Default)]
@@ -87,28 +116,39 @@ fn rms_db(samples: impl Iterator<Item = f32>) -> f32 {
     (10.0 * (sum / n as f64).log10()) as f32
 }
 
-/// Runs the level meter while it lives.
-pub struct MutedSpeechMonitor {
+/// What the monitor reports to and asks from the rest of the app.
+pub struct MicHooks {
+    /// Whether audio is being transmitted right now.
+    pub transmitting: Box<dyn Fn() -> bool + Send>,
+    /// Current voice activation threshold in dBFS.
+    pub threshold_db: Box<dyn Fn() -> f32 + Send>,
+    /// Voice activation opened or closed.
+    pub on_gate: Box<dyn Fn(bool) + Send>,
+    /// Talking for a while without transmitting.
+    pub on_hint: Box<dyn Fn() + Send>,
+    /// Loudest level (dBFS) of the last ~60 ms, for the meter.
+    pub on_level: Box<dyn Fn(f32) + Send>,
+}
+
+/// Runs the level monitor while it lives.
+pub struct MicMonitor {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
-impl MutedSpeechMonitor {
+impl MicMonitor {
     /// `device_name`: the microphone WebRTC uses (None: system default).
-    /// `transmitting` is polled; `on_hint` runs when the beep is due.
-    pub fn start(
-        device_name: Option<String>,
-        transmitting: impl Fn() -> bool + Send + 'static,
-        on_hint: impl Fn() + Send + 'static,
-    ) -> Self {
+    pub fn start(device_name: Option<String>, hooks: MicHooks) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let stop = stop.clone();
             std::thread::Builder::new()
-                .name("muted-speech".into())
+                .name("mic-monitor".into())
                 .spawn(move || {
-                    if let Err(e) = run(device_name, &stop, transmitting, on_hint) {
-                        tracing::warn!("muted-speech hint unavailable: {e}");
+                    if let Err(e) = run(device_name, &stop, &hooks) {
+                        // Without a level, voice activation must not stay closed.
+                        tracing::warn!("microphone monitor unavailable: {e}");
+                        (hooks.on_gate)(true);
                     }
                 })
                 .ok()
@@ -117,7 +157,7 @@ impl MutedSpeechMonitor {
     }
 }
 
-impl Drop for MutedSpeechMonitor {
+impl Drop for MicMonitor {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
@@ -138,12 +178,7 @@ fn input_device(name: Option<&str>) -> Option<cpal::Device> {
     host.default_input_device()
 }
 
-fn run(
-    device_name: Option<String>,
-    stop: &AtomicBool,
-    transmitting: impl Fn() -> bool,
-    on_hint: impl Fn(),
-) -> anyhow::Result<()> {
+fn run(device_name: Option<String>, stop: &AtomicBool, hooks: &MicHooks) -> anyhow::Result<()> {
     let device =
         input_device(device_name.as_deref()).ok_or_else(|| anyhow::anyhow!("no input device"))?;
     let supported = device.default_input_config()?;
@@ -184,20 +219,36 @@ fn run(
         other => anyhow::bail!("unsupported sample format {other:?}"),
     };
     stream.play()?;
-    tracing::debug!(device = ?device_name, "muted-speech level meter running");
+    tracing::debug!(device = ?device_name, "microphone monitor running");
 
+    let mut gate = Gate::default();
+    let mut gate_open = false;
+    (hooks.on_gate)(false);
     let mut detector = Detector::default();
+    let (mut detector_peak, mut level_peak) = (-120.0f32, -120.0f32);
     let mut ticks = 0u32;
     while !stop.load(Ordering::Relaxed) {
         std::thread::sleep(POLL);
+        let now = Instant::now();
         let level = f32::from_bits(peak.swap((-120.0f32).to_bits(), Ordering::Relaxed));
-        if detector.update(Instant::now(), level, transmitting()) {
-            tracing::debug!("talking while not transmitting: hinting");
-            on_hint();
+        let open = gate.update(now, level, (hooks.threshold_db)());
+        if open != gate_open {
+            gate_open = open;
+            (hooks.on_gate)(open);
         }
+        detector_peak = detector_peak.max(level);
+        level_peak = level_peak.max(level);
         ticks = ticks.wrapping_add(1);
-        if ticks.is_multiple_of(50) {
-            tracing::trace!(level, floor = ?detector.noise_floor_db, "microphone level");
+        if ticks.is_multiple_of(DETECTOR_TICKS) {
+            if detector.update(now, detector_peak, (hooks.transmitting)()) {
+                tracing::debug!("talking while not transmitting: hinting");
+                (hooks.on_hint)();
+            }
+            detector_peak = -120.0;
+        }
+        if ticks.is_multiple_of(LEVEL_TICKS) {
+            (hooks.on_level)(level_peak);
+            level_peak = -120.0;
         }
     }
     Ok(())
@@ -279,6 +330,21 @@ mod tests {
         // A fan at -40 dBFS: loud, but constant.
         let beeps = simulate(&mut d, Instant::now(), 40.0, false, |_| -40.0);
         assert!(beeps.is_empty(), "{beeps:?}");
+    }
+
+    #[test]
+    fn gate_opens_at_threshold_and_holds_over_short_drops() {
+        let mut g = Gate::default();
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        assert!(!g.update(at(0), -60.0, -45.0));
+        assert!(g.update(at(10), -30.0, -45.0));
+        // Word ending: quiet again, still open within the hangover.
+        assert!(g.update(at(300), -70.0, -45.0));
+        assert!(g.update(at(500), -70.0, -45.0));
+        assert!(!g.update(at(520), -70.0, -45.0));
+        // Exactly at the threshold counts as speech.
+        assert!(g.update(at(600), -45.0, -45.0));
     }
 
     #[test]

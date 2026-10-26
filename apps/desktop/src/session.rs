@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 
 use crate::AppState;
 use crate::audio::AudioPrefs;
-use crate::muted_speech::MutedSpeechMonitor;
+use crate::mic::{MicHooks, MicMonitor};
 use crate::screen::{ScreenShare, ShareInfo};
 use crate::stats::{self, LinkStats};
 use crate::viewer::Viewer;
@@ -43,7 +43,7 @@ pub struct Session {
     /// The platform audio device module (WASAPI capture and playout).
     _audio: PlatformAudio,
     /// Beeps when the user talks while nothing is transmitted.
-    muted_speech: MutedSpeechMonitor,
+    mic_monitor: MicMonitor,
 }
 
 type Viewers = Arc<std::sync::Mutex<HashMap<TrackSid, Viewer>>>;
@@ -63,19 +63,34 @@ fn apply_local_mute(room: &Room, identity: &str, muted: bool) {
     }
 }
 
-fn start_muted_speech(
-    app: &AppHandle,
-    room: &Arc<Room>,
-    device: Option<String>,
-) -> MutedSpeechMonitor {
-    let (room, app, hint_app) = (room.clone(), app.clone(), app.clone());
-    MutedSpeechMonitor::start(
-        device,
-        move || mic_published(&room) && app.state::<AppState>().voice.transmitting(),
-        move || {
-            let _ = hint_app.emit("muted-speech", ());
+fn start_mic_monitor(app: &AppHandle, room: &Arc<Room>, device: Option<String>) -> MicMonitor {
+    let hooks = MicHooks {
+        transmitting: {
+            let (app, room) = (app.clone(), room.clone());
+            Box::new(move || mic_published(&room) && app.state::<AppState>().voice.transmitting())
         },
-    )
+        threshold_db: {
+            let app = app.clone();
+            Box::new(move || app.state::<AppState>().voice.threshold_db())
+        },
+        on_gate: {
+            let app = app.clone();
+            Box::new(move |open| app.state::<AppState>().voice.set_va_open(open))
+        },
+        on_hint: {
+            let app = app.clone();
+            Box::new(move || {
+                let _ = app.emit("muted-speech", ());
+            })
+        },
+        on_level: {
+            let app = app.clone();
+            Box::new(move |db| {
+                let _ = app.emit("mic-level", db);
+            })
+        },
+    };
+    MicMonitor::start(device, hooks)
 }
 
 /// Whether the client should join again by itself after this disconnect:
@@ -198,7 +213,7 @@ impl Session {
         }
         voice.resync();
 
-        let muted_speech = start_muted_speech(&app, &room, audio_prefs.input_name(&audio));
+        let mic_monitor = start_mic_monitor(&app, &room, audio_prefs.input_name(&audio));
 
         let mic_id = mic.rtc_track().id();
         let link_stats = Arc::new(Mutex::new(HashMap::new()));
@@ -224,7 +239,7 @@ impl Session {
             share: None,
             tasks,
             _audio: audio,
-            muted_speech,
+            mic_monitor,
         })
     }
 
@@ -236,10 +251,10 @@ impl Session {
         &self.livekit_url
     }
 
-    /// Points the "talking while muted" detector at the microphone `device`.
-    pub fn restart_muted_speech(&mut self, device: Option<String>) {
+    /// Points the microphone monitor (voice activation, hint, meter) at `device`.
+    pub fn restart_mic_monitor(&mut self, device: Option<String>) {
         // The old monitor stops when replaced.
-        self.muted_speech = start_muted_speech(&self.app, &self.room, device);
+        self.mic_monitor = start_mic_monitor(&self.app, &self.room, device);
     }
 
     pub fn set_local_mute(&self, identity: &str, muted: bool) {

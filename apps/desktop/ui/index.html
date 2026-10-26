@@ -62,6 +62,13 @@
           <summary>Voice settings</summary>
           <label class="inline"><input type="radio" name="mode" value="pushToTalk" checked> Push to talk</label>
           <label class="inline"><input type="radio" name="mode" value="voiceActivation"> Voice activation</label>
+          <label>Voice activation level <span id="va-value" class="muted"></span>
+            <input id="va-threshold" type="range" min="-80" max="-10" step="1" value="-50">
+          </label>
+          <div class="meter" title="Microphone level (active while in a voice channel)">
+            <div id="meter-fill" class="meter-fill"></div>
+            <div id="meter-mark" class="meter-mark"></div>
+          </div>
           <div class="row">
             <label>PTT key <input id="ptt-key" value="F8" size="12"></label>
             <button id="ptt-set" type="button" class="small">Set</button>

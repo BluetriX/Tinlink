@@ -800,6 +800,7 @@ function voiceLeft() {
   for (const id of ["voice-leave", "share-start", "share-stop", "share-info", "tx", "muted-hint"]) $(id).hidden = true;
   $("participants").replaceChildren();
   participantRows.clear();
+  $("meter-fill").style.width = "0";
   updateSpeaking();
 }
 
@@ -1027,6 +1028,29 @@ $("ptt-record").addEventListener("click", async () => {
   }
 });
 
+// Voice activation level: slider from -80 to -10 dBFS, meter over the same range.
+const METER_MIN = -80;
+const METER_MAX = -10;
+const meterPercent = (db) => Math.max(0, Math.min(100, ((db - METER_MIN) / (METER_MAX - METER_MIN)) * 100));
+
+function showThreshold(db) {
+  $("va-value").textContent = `${db} dB`;
+  $("meter-mark").style.left = `${meterPercent(db)}%`;
+}
+
+$("va-threshold").addEventListener("input", () => {
+  const db = Number($("va-threshold").value);
+  showThreshold(db);
+  invoke("set_va_threshold", { db });
+  settings.save({ vaThreshold: db });
+});
+
+listen("mic-level", (ev) => {
+  const db = ev.payload;
+  $("meter-fill").style.width = `${meterPercent(db)}%`;
+  $("meter-fill").classList.toggle("open", db >= Number($("va-threshold").value));
+});
+
 async function loadAudioDevices(saved) {
   const devices = await run(() => invoke("audio_devices"));
   if (!devices) return;
@@ -1065,6 +1089,10 @@ async function init() {
   document.querySelector(`input[name=mode][value=${mode}]`).checked = true;
   await invoke("set_voice_mode", { mode });
   if (saved.pttKey) await run(() => invoke("set_ptt_key", { key: saved.pttKey }));
+  const threshold = saved.vaThreshold ?? -50;
+  $("va-threshold").value = String(threshold);
+  showThreshold(threshold);
+  await invoke("set_va_threshold", { db: threshold });
   for (const identity of saved.localMutes || []) {
     await run(() => invoke("set_local_mute", { identity, muted: true }));
   }

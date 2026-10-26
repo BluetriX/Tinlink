@@ -15,8 +15,8 @@ use serde::Deserialize;
 pub enum VoiceMode {
     /// Transmit only while the push-to-talk key is held.
     PushToTalk,
-    /// Transmit continuously; WebRTC noise suppression and Opus DTX keep
-    /// silence out of the stream.
+    /// Transmit while the microphone level is above a threshold (with a
+    /// short hangover), see [`crate::mic::Gate`].
     VoiceActivation,
 }
 
@@ -25,9 +25,16 @@ pub struct Voice {
     inner: Mutex<Inner>,
 }
 
+/// Default voice activation threshold in dBFS (quiet rooms measure around
+/// -80, speech -40 to -20).
+pub const DEFAULT_THRESHOLD_DB: f32 = -50.0;
+
 struct Inner {
     mode: VoiceMode,
     ptt_down: bool,
+    /// Voice activation gate, driven by the microphone monitor.
+    va_open: bool,
+    threshold_db: f32,
     /// The published track and the runtime it belongs to: muting spawns
     /// tasks, but the hotkey handler runs on the (non-Tokio) main thread.
     mic: Option<(LocalAudioTrack, tokio::runtime::Handle)>,
@@ -38,6 +45,8 @@ impl Default for Inner {
         Self {
             mode: VoiceMode::PushToTalk,
             ptt_down: false,
+            va_open: false,
+            threshold_db: DEFAULT_THRESHOLD_DB,
             mic: None,
         }
     }
@@ -47,7 +56,7 @@ impl Inner {
     fn transmitting(&self) -> bool {
         match self.mode {
             VoiceMode::PushToTalk => self.ptt_down,
-            VoiceMode::VoiceActivation => true,
+            VoiceMode::VoiceActivation => self.va_open,
         }
     }
 
@@ -86,6 +95,22 @@ impl Voice {
         let mut inner = self.inner.lock().unwrap();
         inner.mic = mic.map(|mic| (mic, tokio::runtime::Handle::current()));
         inner.apply();
+    }
+
+    pub fn set_va_open(&self, open: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.va_open != open {
+            inner.va_open = open;
+            inner.apply();
+        }
+    }
+
+    pub fn set_threshold_db(&self, db: f32) {
+        self.inner.lock().unwrap().threshold_db = db.clamp(-90.0, 0.0);
+    }
+
+    pub fn threshold_db(&self) -> f32 {
+        self.inner.lock().unwrap().threshold_db
     }
 
     /// Detaches the microphone if it is still `track_id` (another session
@@ -133,6 +158,7 @@ mod tests {
             mode,
             ptt_down,
             mic: None,
+            ..Inner::default()
         }
     }
 
@@ -143,8 +169,25 @@ mod tests {
     }
 
     #[test]
-    fn voice_activation_always_transmits() {
-        assert!(inner(VoiceMode::VoiceActivation, false).transmitting());
+    fn voice_activation_follows_the_gate() {
+        let mut i = inner(VoiceMode::VoiceActivation, false);
+        assert!(!i.transmitting());
+        i.va_open = true;
+        assert!(i.transmitting());
+        // The push-to-talk key does not matter in this mode.
+        i.va_open = false;
+        i.ptt_down = true;
+        assert!(!i.transmitting());
+    }
+
+    #[test]
+    fn threshold_is_clamped() {
+        let voice = Voice::default();
+        assert_eq!(voice.threshold_db(), DEFAULT_THRESHOLD_DB);
+        voice.set_threshold_db(-200.0);
+        assert_eq!(voice.threshold_db(), -90.0);
+        voice.set_threshold_db(5.0);
+        assert_eq!(voice.threshold_db(), 0.0);
     }
 
     #[test]
