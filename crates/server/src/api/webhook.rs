@@ -55,7 +55,8 @@ pub async fn receive(
     else {
         return Ok(StatusCode::OK);
     };
-    let Some(group_id): Option<Uuid> =
+    // Direct message channels (no group) have no voice.
+    let Some(Some(group_id)): Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT group_id FROM channels WHERE id = $1")
             .bind(channel_id)
             .fetch_optional(&state.db)

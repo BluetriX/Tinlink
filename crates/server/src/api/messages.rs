@@ -9,7 +9,7 @@ use tinlink_protocol::Permissions;
 use uuid::Uuid;
 
 use super::attachments::{self, AttachmentInfo};
-use crate::access::{Member, channel_access};
+use crate::access::{Member, chat_access};
 use crate::auth::AuthUser;
 use crate::error::{AppError, AppResult};
 use crate::events::EventKind;
@@ -157,7 +157,7 @@ pub async fn read(
     Path(channel_id): Path<Uuid>,
     Json(req): Json<ReadRequest>,
 ) -> AppResult<StatusCode> {
-    channel_access(&state.db, channel_id, user.id).await?;
+    chat_access(&state.db, channel_id, user.id).await?;
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM messages WHERE id = $1 AND channel_id = $2)",
     )
@@ -186,7 +186,7 @@ pub async fn list(
     Path(channel_id): Path<Uuid>,
     Query(q): Query<ListQuery>,
 ) -> AppResult<Json<Vec<MessageInfo>>> {
-    channel_access(&state.db, channel_id, user.id).await?;
+    chat_access(&state.db, channel_id, user.id).await?;
     let limit = q.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
     let mut messages: Vec<MessageInfo> = sqlx::query_as(
         "SELECT m.id, m.channel_id, m.author_id, u.display_name AS author_name, m.content, m.created_at, m.edited_at
@@ -233,8 +233,8 @@ pub async fn post(
     Path(channel_id): Path<Uuid>,
     Json(req): Json<PostMessage>,
 ) -> AppResult<(StatusCode, Json<MessageInfo>)> {
-    let (member, perms) = channel_access(&state.db, channel_id, user.id).await?;
-    if !perms.contains(Permissions::SEND_MESSAGES) {
+    let access = chat_access(&state.db, channel_id, user.id).await?;
+    if !access.perms.contains(Permissions::SEND_MESSAGES) {
         return Err(AppError::Forbidden);
     }
     if req.attachment_ids.len() > MAX_ATTACHMENTS {
@@ -274,14 +274,16 @@ pub async fn post(
             return Err(AppError::bad_request("unknown or already used attachment"));
         }
     }
-    store_mentions(&state, &mut tx, &member, channel_id, message.id, content).await?;
+    if let Some(member) = &access.member {
+        store_mentions(&state, &mut tx, member, channel_id, message.id, content).await?;
+    }
     // Your own message is read by definition.
     mark_read(&mut *tx, user.id, channel_id, message.id).await?;
     tx.commit().await?;
     attach(&state, std::slice::from_mut(&mut message)).await?;
-    state.events.channel(
+    state.events.chat(
         EventKind::MessageCreated,
-        member.group_id,
+        access.group_id,
         channel_id,
         &message,
     );
@@ -294,7 +296,7 @@ pub async fn edit(
     Path((channel_id, message_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<EditMessage>,
 ) -> AppResult<Json<MessageInfo>> {
-    let (member, _) = channel_access(&state.db, channel_id, user.id).await?;
+    let access = chat_access(&state.db, channel_id, user.id).await?;
     let content = validate_content(&req.content, false)?;
     let mut tx = state.db.begin().await?;
     // Only the author can edit; anything else looks like a missing message.
@@ -313,12 +315,14 @@ pub async fn edit(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or(AppError::NotFound)?;
-    store_mentions(&state, &mut tx, &member, channel_id, message.id, content).await?;
+    if let Some(member) = &access.member {
+        store_mentions(&state, &mut tx, member, channel_id, message.id, content).await?;
+    }
     tx.commit().await?;
     attach(&state, std::slice::from_mut(&mut message)).await?;
-    state.events.channel(
+    state.events.chat(
         EventKind::MessageUpdated,
-        member.group_id,
+        access.group_id,
         channel_id,
         &message,
     );
@@ -331,7 +335,7 @@ pub async fn delete(
     user: AuthUser,
     Path((channel_id, message_id)): Path<(Uuid, Uuid)>,
 ) -> AppResult<StatusCode> {
-    let (member, perms) = channel_access(&state.db, channel_id, user.id).await?;
+    let access = chat_access(&state.db, channel_id, user.id).await?;
     let author: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT author_id FROM messages WHERE id = $1 AND channel_id = $2")
             .bind(message_id)
@@ -339,16 +343,16 @@ pub async fn delete(
             .fetch_optional(&state.db)
             .await?;
     let author = author.ok_or(AppError::NotFound)?;
-    if author != Some(user.id) && !perms.contains(Permissions::MANAGE_MESSAGES) {
+    if author != Some(user.id) && !access.perms.contains(Permissions::MANAGE_MESSAGES) {
         return Err(AppError::Forbidden);
     }
     sqlx::query("DELETE FROM messages WHERE id = $1")
         .bind(message_id)
         .execute(&state.db)
         .await?;
-    state.events.channel(
+    state.events.chat(
         EventKind::MessageDeleted,
-        member.group_id,
+        access.group_id,
         channel_id,
         serde_json::json!({ "id": message_id }),
     );

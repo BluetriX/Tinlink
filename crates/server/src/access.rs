@@ -143,12 +143,14 @@ pub async fn load_overwrites(
 }
 
 /// Looks up the group a channel belongs to.
+/// Direct message channels have no group and are reported as not found.
 pub async fn channel_group(db: &PgPool, channel_id: Uuid) -> AppResult<Uuid> {
-    sqlx::query_scalar("SELECT group_id FROM channels WHERE id = $1")
-        .bind(channel_id)
-        .fetch_optional(db)
-        .await?
-        .ok_or(AppError::NotFound)
+    let group: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT group_id FROM channels WHERE id = $1")
+            .bind(channel_id)
+            .fetch_optional(db)
+            .await?;
+    group.flatten().ok_or(AppError::NotFound)
 }
 
 /// Loads the member for the group of `channel_id` and its channel permissions.
@@ -165,4 +167,61 @@ pub async fn channel_access(
         return Err(AppError::NotFound);
     }
     Ok((member, perms))
+}
+
+/// What both participants may do in a direct message channel: chat, but
+/// not moderate.
+pub const DIRECT_PERMISSIONS: Permissions = Permissions::VIEW_CHANNEL
+    .union(Permissions::SEND_MESSAGES)
+    .union(Permissions::ATTACH_FILES);
+
+/// Access to a text chat, which is either a group channel or a direct
+/// message channel.
+pub struct ChatAccess {
+    /// None for direct message channels.
+    pub group_id: Option<Uuid>,
+    /// The caller's membership, for group channels.
+    pub member: Option<Member>,
+    pub perms: Permissions,
+}
+
+/// Like `channel_access`, but also admits the participants of a direct
+/// message channel. Used by everything that only deals with messages.
+pub async fn chat_access(db: &PgPool, channel_id: Uuid, user_id: Uuid) -> AppResult<ChatAccess> {
+    let row: Option<(Option<Uuid>, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+        "SELECT c.group_id, d.user_a, d.user_b FROM channels c
+         LEFT JOIN direct_channels d ON d.channel_id = c.id WHERE c.id = $1",
+    )
+    .bind(channel_id)
+    .fetch_optional(db)
+    .await?;
+    match row.ok_or(AppError::NotFound)? {
+        (Some(_), _, _) => {
+            let (member, perms) = channel_access(db, channel_id, user_id).await?;
+            Ok(ChatAccess {
+                group_id: Some(member.group_id),
+                member: Some(member),
+                perms,
+            })
+        }
+        (None, a, b) if a == Some(user_id) || b == Some(user_id) => Ok(ChatAccess {
+            group_id: None,
+            member: None,
+            perms: DIRECT_PERMISSIONS,
+        }),
+        _ => Err(AppError::NotFound),
+    }
+}
+
+/// Whether the user is one of the two participants of a direct message channel.
+pub async fn is_direct_participant(db: &PgPool, channel_id: Uuid, user_id: Uuid) -> bool {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM direct_channels
+                        WHERE channel_id = $1 AND (user_a = $2 OR user_b = $2))",
+    )
+    .bind(channel_id)
+    .bind(user_id)
+    .fetch_one(db)
+    .await
+    .unwrap_or(false)
 }

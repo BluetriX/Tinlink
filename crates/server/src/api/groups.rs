@@ -238,6 +238,8 @@ pub struct MemberInfo {
     pub name: String,
     pub display_name: String,
     pub role_ids: Vec<Uuid>,
+    #[sqlx(skip)]
+    pub online: bool,
 }
 
 pub async fn list_members(
@@ -246,7 +248,7 @@ pub async fn list_members(
     Path(group_id): Path<Uuid>,
 ) -> AppResult<Json<Vec<MemberInfo>>> {
     Member::load(&state.db, group_id, user.id).await?;
-    let members = sqlx::query_as(
+    let mut members: Vec<MemberInfo> = sqlx::query_as(
         "SELECT u.id AS user_id, u.name, u.display_name,
                 COALESCE(array_agg(mr.role_id) FILTER (WHERE mr.role_id IS NOT NULL), '{}') AS role_ids
          FROM members m JOIN users u ON u.id = m.user_id
@@ -256,6 +258,9 @@ pub async fn list_members(
     .bind(group_id)
     .fetch_all(&state.db)
     .await?;
+    for m in &mut members {
+        m.online = state.presence.is_online(m.user_id);
+    }
     Ok(Json(members))
 }
 

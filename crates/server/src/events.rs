@@ -34,13 +34,21 @@ pub enum EventKind {
     /// should refetch channels and permissions.
     GroupUpdated,
     GroupDeleted,
+    /// A member came online or went offline (`data.online`); sent once per
+    /// group the user is in.
+    PresenceChanged,
+    /// `user_id` is typing in the channel; clients show it for a few seconds.
+    Typing,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Event {
     #[serde(rename = "type")]
     pub kind: EventKind,
-    pub group_id: Uuid,
+    /// None for direct message channels, which belong to no group; delivery
+    /// then requires being one of the two participants.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<Uuid>,
     /// Set for channel-scoped events; delivery then requires VIEW_CHANNEL.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub channel_id: Option<Uuid>,
@@ -76,7 +84,7 @@ impl EventHub {
     pub fn group(&self, kind: EventKind, group_id: Uuid, data: impl Serialize) {
         self.publish(Event {
             kind,
-            group_id,
+            group_id: Some(group_id),
             channel_id: None,
             user_id: None,
             data: serde_json::to_value(data).unwrap_or(Value::Null),
@@ -84,6 +92,17 @@ impl EventHub {
     }
 
     pub fn channel(&self, kind: EventKind, group_id: Uuid, channel_id: Uuid, data: impl Serialize) {
+        self.chat(kind, Some(group_id), channel_id, data);
+    }
+
+    /// A channel event for a group channel or a direct message channel.
+    pub fn chat(
+        &self,
+        kind: EventKind,
+        group_id: Option<Uuid>,
+        channel_id: Uuid,
+        data: impl Serialize,
+    ) {
         self.publish(Event {
             kind,
             group_id,
@@ -96,7 +115,7 @@ impl EventHub {
     pub fn member(&self, kind: EventKind, group_id: Uuid, user_id: Uuid) {
         self.publish(Event {
             kind,
-            group_id,
+            group_id: Some(group_id),
             channel_id: None,
             user_id: Some(user_id),
             data: Value::Null,

@@ -150,7 +150,7 @@ pub async fn set_mute(
     voice_sync::refresh_group(&state, group_id, Some(target_id)).await?;
     state.events.publish(crate::events::Event {
         kind: EventKind::VoiceMuteChanged,
-        group_id,
+        group_id: Some(group_id),
         channel_id: None,
         user_id: Some(target_id),
         data: serde_json::json!({ "muted": req.muted }),
@@ -229,7 +229,7 @@ pub async fn move_member(
         .map_err(map_room_error)?;
     state.events.publish(crate::events::Event {
         kind: EventKind::VoiceMoved,
-        group_id: actor.group_id,
+        group_id: Some(actor.group_id),
         channel_id: None,
         user_id: Some(target_id),
         data: serde_json::json!({ "from": channel_id, "to": req.to }),

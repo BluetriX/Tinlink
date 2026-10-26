@@ -88,14 +88,15 @@ pub fn spawn_voice_sync(state: AppState) {
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
             };
+            let Some(group_id) = event.group_id else {
+                continue;
+            };
             let only_user = match event.kind {
                 EventKind::GroupUpdated => None,
                 EventKind::MemberLeft => event.user_id,
                 _ => continue,
             };
-            if let Err(err) =
-                crate::voice_sync::refresh_group(&state, event.group_id, only_user).await
-            {
+            if let Err(err) = crate::voice_sync::refresh_group(&state, group_id, only_user).await {
                 tracing::warn!(error = ?err, "voice permission sync failed");
             }
         }

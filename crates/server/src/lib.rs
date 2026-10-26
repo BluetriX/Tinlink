@@ -9,6 +9,7 @@ pub mod events;
 pub mod files;
 mod gateway;
 pub mod livekit;
+pub mod presence;
 mod ratelimit;
 pub mod state;
 pub mod tasks;

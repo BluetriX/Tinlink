@@ -2,6 +2,7 @@
 
 mod attachments;
 mod channels;
+mod direct;
 mod groups;
 mod messages;
 mod roles;
@@ -23,6 +24,7 @@ pub fn router() -> Router<AppState> {
         .route("/users/me", get(auth::me))
         .route("/users/me/password", put(auth::change_password))
         .route("/info", get(info))
+        .route("/dms", get(direct::list).post(direct::open))
         .route("/groups", get(groups::list_mine).post(groups::create))
         .route(
             "/groups/{group_id}",

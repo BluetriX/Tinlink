@@ -20,7 +20,7 @@ use tinlink_protocol::Permissions;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 
-use crate::access::channel_access;
+use crate::access::chat_access;
 use crate::auth::AuthUser;
 use crate::error::{AppError, AppResult};
 use crate::files;
@@ -131,8 +131,8 @@ pub async fn upload(
     Path(channel_id): Path<Uuid>,
     mut multipart: Multipart,
 ) -> AppResult<(StatusCode, Json<AttachmentInfo>)> {
-    let (_, perms) = channel_access(&state.db, channel_id, user.id).await?;
-    if !perms.contains(Permissions::ATTACH_FILES) {
+    let access = chat_access(&state.db, channel_id, user.id).await?;
+    if !access.perms.contains(Permissions::ATTACH_FILES) {
         return Err(AppError::Forbidden);
     }
     let mut field = loop {

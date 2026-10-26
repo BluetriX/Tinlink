@@ -5,6 +5,7 @@ use sqlx::PgPool;
 use crate::config::Config;
 use crate::events::EventHub;
 use crate::livekit::RoomService;
+use crate::presence::Presence;
 use crate::ratelimit::LoginLimiter;
 
 #[derive(Clone)]
@@ -13,6 +14,7 @@ pub struct AppState {
     pub db: PgPool,
     pub events: EventHub,
     pub login_limiter: Arc<LoginLimiter>,
+    pub presence: Arc<Presence>,
     pub rooms: RoomService,
 }
 
@@ -24,6 +26,7 @@ impl AppState {
             db,
             events: EventHub::default(),
             login_limiter: Arc::default(),
+            presence: Arc::default(),
         }
     }
 }

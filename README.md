@@ -136,7 +136,7 @@ serialized as flag names, e.g. `"VIEW_CHANNEL | SEND_MESSAGES"`.
 | PUT | `/users/me/password` | Change password `{"current_password","new_password"}`, signs out other sessions |
 | GET, POST | `/groups` | My groups (with `unread` and `mention_count`), create a group |
 | GET, PATCH, DELETE | `/groups/{id}` | Group details (incl. my permissions), settings, delete (owner) |
-| GET | `/groups/{id}/members` | Members with role ids |
+| GET | `/groups/{id}/members` | Members with role ids and `online` |
 | DELETE | `/groups/{id}/members/{user}` | Leave or kick |
 | PUT, DELETE | `/groups/{id}/members/{user}/roles/{role}` | Assign or remove a role |
 | POST | `/groups/{id}/invites`, `/invites/{code}/join` | Invites |
@@ -152,6 +152,7 @@ serialized as flag names, e.g. `"VIEW_CHANNEL | SEND_MESSAGES"`.
 | PUT | `/channels/{id}/read` | Mark read up to `{"message_id"}` (never moves back) |
 | POST | `/channels/{id}/attachments` | Upload a file (multipart field `file`), then send its id in `attachment_ids` |
 | GET | `/files/{id}?exp=&sig=` | Download via the signed URL included in messages |
+| GET, POST | `/dms` | My direct message channels (other user, read state, `unread_count`), open one with `{"user_id"}` |
 | GET | `/info` | Server version and source code URL |
 | POST | `/channels/{id}/voice-token` | LiveKit token for the channel's voice room |
 | POST | `/voice/token` | Unauthenticated dev token (only with `TINLINK_DEV_INSECURE_TOKENS=true`) |
@@ -164,6 +165,19 @@ Live updates come over a WebSocket at `/api/gateway`. The client first sends
 `message_created`, `channel_updated`, `member_joined` or `group_updated` (refetch
 channels and permissions). Events are filtered by the receiver's permissions. On
 `{"type":"resync"}` the client fell behind and should reload its state.
+
+A user with an open gateway connection is online; `presence_changed`
+(`{"online":true|false}`, once per shared group) announces changes. While typing,
+clients send `{"type":"typing","channel_id":"..."}` every few seconds; others who
+can see the channel receive a `typing` event (`user_id`, `data.name`) and show it
+for about five seconds or until that user's message arrives.
+
+Direct messages are channels without a group between exactly two users. A new
+conversation needs a shared group; existing ones stay open. Messages, uploads,
+read markers and the messages endpoints work as in group channels, without
+mentions or moderation. Their events carry no `group_id` and reach only the two
+participants; a `message_created` for an unknown channel means a new
+conversation, so clients refetch `/dms`.
 
 LiveKit reports joins and leaves via webhooks (`/api/livekit/webhook`, signed with
 the API secret). The channel list includes who is in which voice channel, and
