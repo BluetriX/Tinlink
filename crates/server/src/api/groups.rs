@@ -91,18 +91,66 @@ pub async fn create(
     Ok((StatusCode::CREATED, Json(group)))
 }
 
+#[derive(Debug, Serialize)]
+pub struct MyGroup {
+    #[serde(flatten)]
+    pub group: GroupInfo,
+    /// Some visible channel has messages the caller has not read.
+    pub unread: bool,
+    /// Unread messages in visible channels that mention the caller.
+    pub mention_count: i64,
+}
+
 pub async fn list_mine(
     State(state): State<AppState>,
     user: AuthUser,
-) -> AppResult<Json<Vec<GroupInfo>>> {
-    let groups = sqlx::query_as(
+) -> AppResult<Json<Vec<MyGroup>>> {
+    let groups: Vec<GroupInfo> = sqlx::query_as(
         "SELECT g.id, g.name, g.owner_id, g.user_channel_limit FROM groups g
          JOIN members m ON m.group_id = g.id WHERE m.user_id = $1 ORDER BY g.name",
     )
     .bind(user.id)
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(groups))
+    // Per channel: does it have unread messages, and how many unread mentions.
+    let channels: Vec<(Uuid, Uuid, bool, i64)> = sqlx::query_as(
+        "SELECT c.group_id, c.id,
+                EXISTS (SELECT 1 FROM messages m WHERE m.channel_id = c.id
+                        AND (r.last_read_id IS NULL OR m.id > r.last_read_id)),
+                (SELECT count(*) FROM message_mentions mm JOIN messages m ON m.id = mm.message_id
+                 WHERE mm.user_id = $1 AND m.channel_id = c.id
+                   AND (r.last_read_id IS NULL OR m.id > r.last_read_id))
+         FROM channels c JOIN members mb ON mb.group_id = c.group_id AND mb.user_id = $1
+         LEFT JOIN read_states r ON r.channel_id = c.id AND r.user_id = $1",
+    )
+    .bind(user.id)
+    .fetch_all(&state.db)
+    .await?;
+    let mut result = Vec::with_capacity(groups.len());
+    for group in groups {
+        let member = Member::load(&state.db, group.id, user.id).await?;
+        let (mut unread, mut mention_count) = (false, 0);
+        for (_, channel_id, has_unread, mentions) in channels
+            .iter()
+            .filter(|c| c.0 == group.id && (c.2 || c.3 > 0))
+        {
+            // Only channels the caller can still see count.
+            if member
+                .channel_permissions(&state.db, *channel_id)
+                .await?
+                .contains(Permissions::VIEW_CHANNEL)
+            {
+                unread |= *has_unread;
+                mention_count += mentions;
+            }
+        }
+        result.push(MyGroup {
+            group,
+            unread,
+            mention_count,
+        });
+    }
+    Ok(Json(result))
 }
 
 #[derive(Debug, Serialize)]

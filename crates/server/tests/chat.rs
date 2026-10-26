@@ -193,3 +193,57 @@ async fn change_password_signs_out_other_sessions(db: PgPool) {
     );
     assert_eq!(login("new password 123").await.status, StatusCode::OK);
 }
+
+async fn my_group(app: &TestApp, token: &str) -> Value {
+    app.get("/api/groups", token).await.body[0].clone()
+}
+
+#[sqlx::test(migrator = "tinlink_server::MIGRATOR")]
+async fn group_list_shows_unread_and_mentions(db: PgPool) {
+    let app = TestApp::new(db);
+    let (owner, _) = app.register("owner").await;
+    let (alice, _) = app.register("alice").await;
+    let group = app.create_group(&owner, "G").await;
+    app.invite_and_join(&owner, &group, &alice).await;
+    let general = app.channel_id(&owner, &group, "general").await.unwrap();
+
+    assert_eq!(my_group(&app, &alice).await["unread"], false);
+
+    let res = app
+        .post(
+            &format!("/api/channels/{general}/messages"),
+            &owner,
+            json!({ "content": "hi @alice" }),
+        )
+        .await;
+    let id = res.body["id"].as_str().unwrap().to_owned();
+    let g = my_group(&app, &alice).await;
+    assert_eq!(g["id"], group);
+    assert_eq!(g["unread"], true);
+    assert_eq!(g["mention_count"], 1);
+    assert_eq!(my_group(&app, &owner).await["unread"], false);
+
+    // Hidden channels do not count.
+    app.put(
+        &format!("/api/channels/{general}/overwrites/role/{group}"),
+        &owner,
+        json!({ "deny": "VIEW_CHANNEL" }),
+    )
+    .await;
+    assert_eq!(my_group(&app, &alice).await["unread"], false);
+    app.delete(
+        &format!("/api/channels/{general}/overwrites/role/{group}"),
+        &owner,
+    )
+    .await;
+
+    app.put(
+        &format!("/api/channels/{general}/read"),
+        &alice,
+        json!({ "message_id": id }),
+    )
+    .await;
+    let g = my_group(&app, &alice).await;
+    assert_eq!(g["unread"], false);
+    assert_eq!(g["mention_count"], 0);
+}

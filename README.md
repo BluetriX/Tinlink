@@ -128,7 +128,7 @@ serialized as flag names, e.g. `"VIEW_CHANNEL | SEND_MESSAGES"`.
 | POST | `/auth/register`, `/auth/login`, `/auth/logout` | Accounts and sessions |
 | GET | `/users/me` | Current user |
 | PUT | `/users/me/password` | Change password `{"current_password","new_password"}`, signs out other sessions |
-| GET, POST | `/groups` | My groups, create a group |
+| GET, POST | `/groups` | My groups (with `unread` and `mention_count`), create a group |
 | GET, PATCH, DELETE | `/groups/{id}` | Group details (incl. my permissions), settings, delete (owner) |
 | GET | `/groups/{id}/members` | Members with role ids |
 | DELETE | `/groups/{id}/members/{user}` | Leave or kick |
