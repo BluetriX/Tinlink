@@ -44,15 +44,15 @@ test("voice activation gate keeps word endings", () => {
   assert.equal(gate.update(-70, 601), false);
 });
 
-test("muted speech fires after 10 s and then cools down", () => {
+test("muted speech fires after 5 s and then cools down", () => {
   const d = new MutedSpeechDetector();
   let fired = 0;
-  for (let t = 0; t <= 12_000; t += 20) if (d.update(true, false, t)) fired++;
+  for (let t = 0; t <= 7_000; t += 20) if (d.update(true, false, t)) fired++;
   assert.equal(fired, 1);
   // Still talking: the cooldown suppresses repeats for 30 s.
-  for (let t = 12_020; t < 40_000; t += 20) if (d.update(true, false, t)) fired++;
+  for (let t = 7_020; t < 34_000; t += 20) if (d.update(true, false, t)) fired++;
   assert.equal(fired, 1);
-  for (let t = 40_000; t <= 52_000; t += 20) if (d.update(true, false, t)) fired++;
+  for (let t = 34_000; t <= 42_000; t += 20) if (d.update(true, false, t)) fired++;
   assert.equal(fired, 2);
 });
 
@@ -64,7 +64,7 @@ test("muted speech tolerates short pauses and resets on long ones", () => {
   assert.ok(fired);
   const e = new MutedSpeechDetector();
   fired = false;
-  // 4 s talk, 3 s pause: never 10 s in a row.
+  // 4 s talk, 3 s pause: never 5 s in a row.
   for (let t = 0; t <= 30_000; t += 20) fired ||= e.update(t % 7000 < 4000, false, t);
   assert.ok(!fired);
   // Transmitting never fires.

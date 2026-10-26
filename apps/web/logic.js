@@ -60,7 +60,7 @@ export class Gate {
  * `cooldownMs`.
  */
 export class MutedSpeechDetector {
-  constructor({ talkMs = 10_000, gapMs = 2_000, cooldownMs = 30_000 } = {}) {
+  constructor({ talkMs = 5_000, gapMs = 2_000, cooldownMs = 30_000 } = {}) {
     Object.assign(this, { talkMs, gapMs, cooldownMs });
     this.start = null;
     this.lastSpeech = -Infinity;
@@ -79,7 +79,8 @@ export class MutedSpeechDetector {
     } else if (this.start !== null && nowMs - this.lastSpeech > this.gapMs) {
       this.start = null;
     }
-    if (this.start !== null && nowMs - this.start >= this.talkMs && nowMs - this.lastFired >= this.cooldownMs) {
+    // Only fire while talking, not in a pause.
+    if (speaking && this.start !== null && nowMs - this.start >= this.talkMs && nowMs - this.lastFired >= this.cooldownMs) {
       this.lastFired = nowMs;
       this.start = null;
       return true;

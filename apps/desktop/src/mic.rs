@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 /// Continuous talking (short pauses allowed) needed before the beep.
-const TALK_DURATION: Duration = Duration::from_secs(10);
+const TALK_DURATION: Duration = Duration::from_secs(5);
 /// Pauses up to this long still count as one stretch of talking.
 const HANGOVER: Duration = Duration::from_secs(2);
 /// Minimum time between two beeps.
@@ -93,9 +93,11 @@ impl Detector {
             self.talk_start = None;
         }
 
-        let talked_long_enough = self
-            .talk_start
-            .is_some_and(|t| now.duration_since(t) >= TALK_DURATION);
+        // Only beep while the user is actually talking, not in a pause.
+        let talked_long_enough = speaking
+            && self
+                .talk_start
+                .is_some_and(|t| now.duration_since(t) >= TALK_DURATION);
         let cooled_down = self
             .last_beep
             .is_none_or(|t| now.duration_since(t) >= COOLDOWN);
@@ -282,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn beeps_after_ten_seconds_of_muted_talking() {
+    fn beeps_after_five_seconds_of_muted_talking() {
         let mut d = Detector::default();
         let start = Instant::now();
         // Quiet room first, then talking with short pauses.
@@ -294,7 +296,7 @@ mod tests {
             }
         });
         assert_eq!(beeps.len(), 1, "{beeps:?}");
-        assert!((12.9..14.0).contains(&beeps[0]), "{beeps:?}");
+        assert!((7.9..9.0).contains(&beeps[0]), "{beeps:?}");
     }
 
     #[test]
@@ -307,9 +309,9 @@ mod tests {
     #[test]
     fn long_pauses_restart_the_count() {
         let mut d = Detector::default();
-        // 6 s talking, 4 s silence, repeated: never 10 s in one stretch.
+        // 3 s talking, 3 s silence, repeated: never 5 s in one stretch.
         let beeps = simulate(&mut d, Instant::now(), 40.0, false, |t| {
-            if (t % 10.0) < 6.0 { SPEECH } else { NOISE }
+            if (t % 6.0) < 3.0 { SPEECH } else { NOISE }
         });
         assert!(beeps.is_empty(), "{beeps:?}");
     }

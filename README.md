@@ -247,7 +247,7 @@ server answers before connecting and, should the engine still stop
 responding, restarts itself and rejoins. A volume slider per person needs a change in the LiveKit
 SDK's C++ layer and is not possible yet. While sharing, the voice panel shows resolution, frame
 rate and encoder, and a blue frame marks the shared monitor (excluded from the
-capture, so viewers do not see it). If you talk for about 10 seconds while
+capture, so viewers do not see it). If you talk for about 5 seconds while
 nothing is transmitted (push-to-talk not held, or server-muted), the app plays
 a quiet double beep and shows a hint, at most every 30 seconds; for this it
 only measures the microphone level locally.
