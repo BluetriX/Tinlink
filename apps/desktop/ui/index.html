@@ -110,8 +110,19 @@
     </aside>
 
     <section id="chat">
-      <header class="bar"><strong id="channel-name">Select a channel</strong></header>
+      <header class="bar">
+        <strong id="channel-name">Select a channel</strong>
+        <input id="search-input" type="search" placeholder="Search messages" maxlength="200" aria-label="Search messages">
+      </header>
       <div id="messages" aria-live="polite"></div>
+      <div id="search-results" hidden>
+        <div class="search-head">
+          <span id="search-summary"></span>
+          <button id="search-close" type="button" class="small">Close</button>
+        </div>
+        <div id="search-hits"></div>
+        <button id="search-more" type="button" class="small" hidden>Show older results</button>
+      </div>
       <div id="typing" class="typing"></div>
       <ul id="autocomplete" class="autocomplete" hidden></ul>
       <form id="composer" hidden>

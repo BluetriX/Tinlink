@@ -548,13 +548,13 @@ async function showDms(openId) {
   await loadDms();
   renderDmList();
   const dm = dmById(openId || settings.load().dmId) || state.dms[0] || null;
-  if (dm) openDm(dm);
+  if (dm) await openDm(dm);
   else openChannel(null);
 }
 
 function openDm(dm) {
   settings.save({ dmId: dm.id });
-  openChannel({ id: dm.id, name: dmName(dm), dm: true, permissions: "SEND_MESSAGES | ATTACH_FILES" });
+  return openChannel({ id: dm.id, name: dmName(dm), dm: true, permissions: "SEND_MESSAGES | ATTACH_FILES" });
 }
 
 /** Opens (or creates) the conversation with a group member. */
@@ -589,6 +589,132 @@ async function trackDmMessage(m) {
     invoke("notify", { title: `Message from ${m.author_name || "someone"}`, body: body.slice(0, 200) });
   }
 }
+
+// ------------------------------------------------------------- search
+
+const search = { query: "", hits: [] };
+
+/** Lowercased words of a query (letters and digits). */
+function searchTerms(query) {
+  return query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+}
+
+/**
+ * Ranges [start, end) in `text` where a word starts with one of the terms,
+ * sorted and without overlaps (the server matches every word as a prefix).
+ */
+function highlightRanges(text, terms) {
+  const ranges = [];
+  const lower = text.toLowerCase();
+  for (const term of terms) {
+    let i = lower.indexOf(term);
+    while (i >= 0) {
+      if (i === 0 || !/[\p{L}\p{N}]/u.test(lower[i - 1])) ranges.push([i, i + term.length]);
+      i = lower.indexOf(term, i + 1);
+    }
+  }
+  ranges.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  const merged = [];
+  for (const r of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]);
+    else merged.push([...r]);
+  }
+  return merged;
+}
+
+function closeSearch() {
+  $("search-results").hidden = true;
+  $("messages").hidden = false;
+}
+
+async function runSearch(query, more = false) {
+  const before = more ? search.hits[search.hits.length - 1]?.id : null;
+  const params = new URLSearchParams({ q: query, limit: "50" });
+  if (before) params.set("before", before);
+  const page = await run(() => api("GET", `/search?${params}`));
+  if (!page) return;
+  search.query = query;
+  search.hits = more ? [...search.hits, ...page] : page;
+  const terms = searchTerms(query);
+  const hits = page.map((h) => renderHit(h, terms));
+  if (more) $("search-hits").append(...hits);
+  else $("search-hits").replaceChildren(...hits);
+  $("search-summary").textContent = search.hits.length
+    ? `${search.hits.length}${page.length === 50 ? "+" : ""} result${search.hits.length === 1 && page.length < 50 ? "" : "s"} for “${query}”`
+    : `No results for “${query}”`;
+  $("search-more").hidden = page.length < 50;
+  $("messages").hidden = true;
+  $("search-results").hidden = false;
+}
+
+/** Text with the matched word starts wrapped in <mark>, built from DOM nodes. */
+function highlighted(text, terms) {
+  const nodes = [];
+  let pos = 0;
+  for (const [start, end] of highlightRanges(text, terms)) {
+    if (start > pos) nodes.push(text.slice(pos, start));
+    nodes.push(el("mark", { textContent: text.slice(start, end) }));
+    pos = end;
+  }
+  nodes.push(text.slice(pos));
+  return nodes;
+}
+
+function renderHit(h, terms) {
+  const group = h.group_id ? state.groups.find((g) => g.id === h.group_id) : null;
+  const where = h.group_id ? `# ${h.channel_name}${group ? ` · ${group.name}` : ""}` : `@ ${h.channel_name}`;
+  return el("button", { type: "button", class: "hit", onclick: () => openHit(h) },
+    el("div", { class: "meta" },
+      el("span", { class: "where", textContent: where }),
+      el("strong", { textContent: h.author_name || "deleted user" }),
+      el("span", { textContent: ` ${formatTime(h.created_at)}` })),
+    el("div", { class: "text" }, ...highlighted(h.content || "(attachment)", terms)));
+}
+
+/** Opens the channel of a search hit and scrolls to the message. */
+async function openHit(h) {
+  if (!h.group_id) {
+    if (!dmById(h.channel_id)) await loadDms();
+    if (!dmById(h.channel_id)) return;
+    await showDms(h.channel_id);
+  } else {
+    if (state.view !== "group" || state.group?.id !== h.group_id) await selectGroup(h.group_id);
+    const ch = channelById(h.channel_id);
+    if (!ch) return;
+    if (state.channel?.id !== ch.id || !state.messages.length) await openChannel(ch);
+    else closeSearch();
+  }
+  await jumpTo(h.id);
+}
+
+async function jumpTo(messageId) {
+  // Page back through the history until the message is loaded.
+  for (let i = 0; i < 20 && !state.messages.some((m) => m.id === messageId); i++) {
+    if (state.noOlder || !state.messages.length) break;
+    await loadMessages(state.messages[0].id);
+  }
+  const node = $("messages").querySelector(`[data-id="${messageId}"]`);
+  if (!node) {
+    setStatus("That message is too far back to show.");
+    return;
+  }
+  node.scrollIntoView({ block: "center" });
+  node.classList.add("highlight");
+  setTimeout(() => node.classList.remove("highlight"), 2000);
+}
+
+$("search-input").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") {
+    const query = $("search-input").value.trim();
+    if (searchTerms(query).length) runSearch(query);
+  } else if (ev.key === "Escape") {
+    $("search-input").value = "";
+    closeSearch();
+  }
+});
+$("search-close").addEventListener("click", closeSearch);
+$("search-more").addEventListener("click", () => runSearch(search.query, true));
 
 // ------------------------------------------------------------- typing
 
@@ -713,6 +839,7 @@ async function createChannel(category) {
 function openChannel(ch) {
   state.channel = ch;
   clearTyping();
+  closeSearch();
   state.messages = [];
   state.noOlder = false;
   state.pendingFiles = [];
@@ -732,7 +859,7 @@ function openChannel(ch) {
   $("channel-name").textContent = ch.dm ? `@ ${ch.name}` : `# ${ch.name}`;
   $("composer").hidden = !can(ch.permissions, "SEND_MESSAGES");
   $("attach").hidden = !can(ch.permissions, "ATTACH_FILES");
-  loadMessages();
+  return loadMessages();
 }
 
 async function loadMessages(before) {
