@@ -359,9 +359,169 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Words per search query; more are ignored.
+const MAX_SEARCH_WORDS: usize = 8;
+
+/// Turns user input into a tsquery where every word must match as a prefix,
+/// e.g. "Pizza fr" → "pizza:* & fr:*". Only letters and digits survive, so
+/// the result cannot contain tsquery operators.
+pub fn search_query(input: &str) -> Option<String> {
+    let words: Vec<String> = input
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .take(MAX_SEARCH_WORDS)
+        .map(|w| format!("{}:*", w.to_lowercase()))
+        .collect();
+    (!words.is_empty()).then(|| words.join(" & "))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SearchQuery {
+    pub q: String,
+    /// Only this group's channels.
+    pub group_id: Option<Uuid>,
+    /// Only this channel (a group channel or a direct message channel).
+    pub channel_id: Option<Uuid>,
+    /// Hits older than this message id, for paging.
+    pub before: Option<Uuid>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SearchHit {
+    #[serde(flatten)]
+    pub message: MessageInfo,
+    /// None for direct messages.
+    pub group_id: Option<Uuid>,
+    /// The channel's name, or the other participant's name for direct messages.
+    pub channel_name: String,
+}
+
+/// Channels the user may search: visible channels of their groups (or of one
+/// group) plus their direct message channels, or a single channel.
+async fn searchable_channels(
+    state: &AppState,
+    user_id: Uuid,
+    q: &SearchQuery,
+) -> AppResult<Vec<Uuid>> {
+    if let Some(channel_id) = q.channel_id {
+        chat_access(&state.db, channel_id, user_id).await?;
+        return Ok(vec![channel_id]);
+    }
+    let groups: Vec<Uuid> = match q.group_id {
+        Some(id) => vec![id],
+        None => {
+            sqlx::query_scalar("SELECT group_id FROM members WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_all(&state.db)
+                .await?
+        }
+    };
+    let mut channels = Vec::new();
+    for group_id in groups {
+        let member = Member::load(&state.db, group_id, user_id).await?;
+        let ids: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM channels WHERE group_id = $1")
+            .bind(group_id)
+            .fetch_all(&state.db)
+            .await?;
+        for id in ids {
+            if member
+                .channel_permissions(&state.db, id)
+                .await?
+                .contains(Permissions::VIEW_CHANNEL)
+            {
+                channels.push(id);
+            }
+        }
+    }
+    if q.group_id.is_none() {
+        let direct: Vec<Uuid> = sqlx::query_scalar(
+            "SELECT channel_id FROM direct_channels WHERE user_a = $1 OR user_b = $1",
+        )
+        .bind(user_id)
+        .fetch_all(&state.db)
+        .await?;
+        channels.extend(direct);
+    }
+    Ok(channels)
+}
+
+/// Full-text search over the messages the caller can see, newest first.
+pub async fn search(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Query(q): Query<SearchQuery>,
+) -> AppResult<Json<Vec<SearchHit>>> {
+    let Some(tsquery) = search_query(&q.q) else {
+        return Err(AppError::bad_request("enter a search term"));
+    };
+    let channels = searchable_channels(&state, user.id, &q).await?;
+    let limit = q.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
+    let mut messages: Vec<MessageInfo> = sqlx::query_as(
+        "SELECT m.id, m.channel_id, m.author_id, u.display_name AS author_name, m.content, m.created_at, m.edited_at
+         FROM messages m LEFT JOIN users u ON u.id = m.author_id
+         WHERE m.channel_id = ANY($1)
+           AND to_tsvector('simple', m.content) @@ to_tsquery('simple', $2)
+           AND ($3::uuid IS NULL OR m.id < $3)
+         ORDER BY m.id DESC LIMIT $4",
+    )
+    .bind(&channels)
+    .bind(&tsquery)
+    .bind(q.before)
+    .bind(limit)
+    .fetch_all(&state.db)
+    .await?;
+    attach(&state, &mut messages).await?;
+
+    let ids: Vec<Uuid> = messages.iter().map(|m| m.channel_id).collect();
+    let names: Vec<(Uuid, Option<Uuid>, String)> = sqlx::query_as(
+        "SELECT c.id, c.group_id, COALESCE(other.display_name, c.name)
+         FROM channels c
+         LEFT JOIN direct_channels d ON d.channel_id = c.id
+         LEFT JOIN users other
+                ON other.id = CASE WHEN d.user_a = $2 THEN d.user_b ELSE d.user_a END
+         WHERE c.id = ANY($1)",
+    )
+    .bind(&ids)
+    .bind(user.id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(
+        messages
+            .into_iter()
+            .map(|message| {
+                let (group_id, channel_name) = names
+                    .iter()
+                    .find(|n| n.0 == message.channel_id)
+                    .map(|n| (n.1, n.2.clone()))
+                    .unwrap_or_default();
+                SearchHit {
+                    message,
+                    group_id,
+                    channel_name,
+                }
+            })
+            .collect(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::mentioned_names;
+    use super::{mentioned_names, search_query};
+
+    #[test]
+    fn builds_prefix_queries() {
+        assert_eq!(search_query("Pizza fr").as_deref(), Some("pizza:* & fr:*"));
+        assert_eq!(
+            search_query("it's | !bad & (stuff):*").as_deref(),
+            Some("it:* & s:* & bad:* & stuff:*")
+        );
+        assert_eq!(
+            search_query("Grüße 2026").as_deref(),
+            Some("grüße:* & 2026:*")
+        );
+        assert_eq!(search_query("  ?! "), None);
+    }
 
     #[test]
     fn finds_mentions() {

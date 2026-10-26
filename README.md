@@ -153,6 +153,7 @@ serialized as flag names, e.g. `"VIEW_CHANNEL | SEND_MESSAGES"`.
 | POST | `/channels/{id}/attachments` | Upload a file (multipart field `file`), then send its id in `attachment_ids` |
 | GET | `/files/{id}?exp=&sig=` | Download via the signed URL included in messages |
 | GET, POST | `/dms` | My direct message channels (other user, read state, `unread_count`), open one with `{"user_id"}` |
+| GET | `/search?q=&group_id=&channel_id=&before=&limit=` | Search messages the caller can see (every word as a prefix, newest first); hits add `group_id` and `channel_name` |
 | GET | `/info` | Server version and source code URL |
 | POST | `/channels/{id}/voice-token` | LiveKit token for the channel's voice room |
 | POST | `/voice/token` | Unauthenticated dev token (only with `TINLINK_DEV_INSECURE_TOKENS=true`) |
