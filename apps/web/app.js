@@ -1,7 +1,7 @@
 // Tinlink web client. Talks to the server it is served from; media runs in
 // the browser through the vendored LiveKit client. No framework, no build step.
 import {
-  Gate, MutedSpeechDetector, TypingTracker, can, inputName, isUnread, mentionCandidates, mentionQuery, shareBitrate,
+  Gate, MutedSpeechDetector, TypingTracker, can, highlightRanges, searchTerms, inputName, isUnread, mentionCandidates, mentionQuery, shareBitrate,
   shareSize, sortMembers, typingText,
 } from "./logic.js";
 
@@ -573,6 +573,7 @@ async function createChannel(category) {
 // ------------------------------------------------------------------- chat
 
 function openChannel(ch) {
+  closeSearch();
   state.channel = ch;
   state.messages = [];
   state.noOlder = false;
@@ -596,7 +597,7 @@ function openChannel(ch) {
   $("composer").hidden = !can(ch.permissions, "SEND_MESSAGES");
   $("attach").hidden = !can(ch.permissions, "ATTACH_FILES");
   renderTree();
-  loadMessages();
+  return loadMessages();
 }
 
 async function loadMessages(before) {
@@ -866,6 +867,107 @@ $("message-input").addEventListener("keydown", (ev) => {
     $("composer").requestSubmit();
   }
 });
+
+// ----------------------------------------------------------------- search
+
+const search = { query: "", hits: [] };
+
+function closeSearch() {
+  $("search-results").hidden = true;
+  $("messages").hidden = false;
+}
+
+async function runSearch(query, more = false) {
+  const before = more ? search.hits.at(-1)?.id : null;
+  const params = new URLSearchParams({ q: query, limit: "50" });
+  if (before) params.set("before", before);
+  const page = await run(() => api("GET", `/search?${params}`));
+  if (!page) return;
+  search.query = query;
+  search.hits = more ? [...search.hits, ...page] : page;
+  const terms = searchTerms(query);
+  const hits = page.map((h) => renderHit(h, terms));
+  if (more) $("search-hits").append(...hits);
+  else $("search-hits").replaceChildren(...hits);
+  $("search-summary").textContent = search.hits.length
+    ? `${search.hits.length}${page.length === 50 ? "+" : ""} results for “${query}”`
+    : `No results for “${query}”`;
+  $("search-more").hidden = page.length < 50;
+  $("messages").hidden = true;
+  $("search-results").hidden = false;
+}
+
+/** Text with the matched words wrapped in <mark>, built from DOM nodes. */
+function highlighted(text, terms) {
+  const nodes = [];
+  let pos = 0;
+  for (const [start, end] of highlightRanges(text, terms)) {
+    if (start > pos) nodes.push(text.slice(pos, start));
+    nodes.push(el("mark", { textContent: text.slice(start, end) }));
+    pos = end;
+  }
+  nodes.push(text.slice(pos));
+  return nodes;
+}
+
+function renderHit(h, terms) {
+  const group = h.group_id ? state.groups.find((g) => g.id === h.group_id) : null;
+  const where = h.group_id ? `# ${h.channel_name}${group ? ` · ${group.name}` : ""}` : `@ ${h.channel_name}`;
+  return el("button", { type: "button", class: "hit", onclick: () => openHit(h) },
+    el("div", { class: "meta" },
+      el("span", { class: "where", textContent: where }),
+      el("strong", { textContent: h.author_name || "deleted user" }),
+      el("span", { textContent: ` ${formatTime(h.created_at)}` })),
+    el("div", { class: "text" }, ...highlighted(h.content || "(attachment)", terms)));
+}
+
+/** Opens the channel of a search hit and scrolls to the message. */
+async function openHit(h) {
+  if (!h.group_id) {
+    let dm = state.dms.find((d) => d.id === h.channel_id);
+    if (!dm) {
+      await loadDms();
+      dm = state.dms.find((d) => d.id === h.channel_id);
+    }
+    if (!dm) return;
+    if (state.view !== "dms") showDms();
+    await openChannel(dmChannel(dm));
+  } else {
+    if (state.view !== "group" || state.group?.id !== h.group_id) await selectGroup(h.group_id);
+    const ch = state.channels.find((c) => c.id === h.channel_id);
+    if (!ch) return;
+    await openChannel(ch);
+  }
+  await jumpTo(h.id);
+}
+
+async function jumpTo(messageId) {
+  // Page back through the history until the message is loaded.
+  for (let i = 0; i < 20 && !state.messages.some((m) => m.id === messageId); i++) {
+    if (state.noOlder || !state.messages.length) break;
+    await loadMessages(state.messages[0].id);
+  }
+  const node = $("messages").querySelector(`[data-id="${messageId}"]`);
+  if (!node) {
+    setStatus("That message is too far back to show.");
+    return;
+  }
+  node.scrollIntoView({ block: "center" });
+  node.classList.add("highlight");
+  setTimeout(() => node.classList.remove("highlight"), 2000);
+}
+
+$("search-input").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter") {
+    const query = $("search-input").value.trim();
+    if (searchTerms(query).length) runSearch(query);
+  } else if (ev.key === "Escape") {
+    $("search-input").value = "";
+    closeSearch();
+  }
+});
+$("search-close").addEventListener("click", closeSearch);
+$("search-more").addEventListener("click", () => runSearch(search.query, true));
 
 // ------------------------------------------------------------ notifications
 

@@ -151,3 +151,32 @@ export function typingText(names) {
   if (names.length <= 3) return `${names.slice(0, -1).join(", ")} and ${names.at(-1)} are typing…`;
   return "Several people are typing…";
 }
+
+/** Search words as the server splits them: runs of letters and digits. */
+export function searchTerms(query) {
+  return query.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+}
+
+/**
+ * Ranges [start, end) in `text` where a word starts with one of the terms,
+ * sorted and without overlaps, for highlighting search hits.
+ */
+export function highlightRanges(text, terms) {
+  const ranges = [];
+  const lower = text.toLowerCase();
+  for (const term of terms) {
+    let i = lower.indexOf(term);
+    while (i >= 0) {
+      if (i === 0 || !/[\p{L}\p{N}]/u.test(lower[i - 1])) ranges.push([i, i + term.length]);
+      i = lower.indexOf(term, i + 1);
+    }
+  }
+  ranges.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  const merged = [];
+  for (const r of ranges) {
+    const last = merged.at(-1);
+    if (last && r[0] <= last[1]) last[1] = Math.max(last[1], r[1]);
+    else merged.push([...r]);
+  }
+  return merged;
+}

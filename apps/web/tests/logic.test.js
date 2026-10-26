@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  Gate, MutedSpeechDetector, TypingTracker, can, inputName, isUnread, mentionCandidates, mentionQuery, shareBitrate,
+  Gate, MutedSpeechDetector, TypingTracker, can, highlightRanges, searchTerms, inputName, isUnread, mentionCandidates, mentionQuery, shareBitrate,
   shareSize, sortMembers, typingText,
 } from "../logic.js";
 
@@ -118,4 +118,17 @@ test("typing text", () => {
   assert.equal(typingText(["bob"]), "bob is typing…");
   assert.equal(typingText(["a", "b", "c"]), "a, b and c are typing…");
   assert.equal(typingText(["a", "b", "c", "d"]), "Several people are typing…");
+});
+
+test("search terms split like the server", () => {
+  assert.deepEqual(searchTerms("Pizza, fr!"), ["pizza", "fr"]);
+  assert.deepEqual(searchTerms("Grüße 2026"), ["grüße", "2026"]);
+  assert.deepEqual(searchTerms(" ?! "), []);
+});
+
+test("highlight ranges at word starts", () => {
+  assert.deepEqual(highlightRanges("Pizza am Freitag? pizza!", ["piz", "fr"]), [[0, 3], [9, 11], [18, 21]]);
+  // Not inside words, overlaps merge.
+  assert.deepEqual(highlightRanges("Salamipizza", ["piz"]), []);
+  assert.deepEqual(highlightRanges("freitag", ["fr", "frei"]), [[0, 4]]);
 });
