@@ -159,6 +159,9 @@ pub struct GroupDetail {
     pub group: GroupInfo,
     /// The caller's group-wide permissions, so clients can show or hide actions.
     pub permissions: Permissions,
+    /// Position of the caller's highest role (the owner ranks above all);
+    /// only roles and members below it can be managed.
+    pub my_position: i32,
 }
 
 pub async fn get(
@@ -175,6 +178,7 @@ pub async fn get(
     Ok(Json(GroupDetail {
         group,
         permissions: member.group_permissions(),
+        my_position: member.highest_position(),
     }))
 }
 
@@ -333,6 +337,47 @@ pub async fn create_invite(
     .fetch_one(&state.db)
     .await?;
     Ok((StatusCode::CREATED, Json(invite)))
+}
+
+/// Lists the group's invites that can still be used.
+pub async fn list_invites(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(group_id): Path<Uuid>,
+) -> AppResult<Json<Vec<InviteInfo>>> {
+    Member::load(&state.db, group_id, user.id)
+        .await?
+        .require(Permissions::MANAGE_GROUP)?;
+    let invites = sqlx::query_as(
+        "SELECT code, group_id, uses, max_uses, expires_at FROM invites
+         WHERE group_id = $1 AND (expires_at IS NULL OR expires_at > now())
+           AND (max_uses IS NULL OR uses < max_uses)
+         ORDER BY created_at DESC",
+    )
+    .bind(group_id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(invites))
+}
+
+pub async fn delete_invite(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((group_id, code)): Path<(Uuid, String)>,
+) -> AppResult<StatusCode> {
+    Member::load(&state.db, group_id, user.id)
+        .await?
+        .require(Permissions::MANAGE_GROUP)?;
+    let deleted = sqlx::query("DELETE FROM invites WHERE code = $1 AND group_id = $2")
+        .bind(code)
+        .bind(group_id)
+        .execute(&state.db)
+        .await?
+        .rows_affected();
+    if deleted == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Joins the group of an invite. Joining twice is a no-op.

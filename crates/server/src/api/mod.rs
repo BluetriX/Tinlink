@@ -42,7 +42,14 @@ pub fn router() -> Router<AppState> {
             "/groups/{group_id}/members/{user_id}/roles/{role_id}",
             put(roles::assign).delete(roles::unassign),
         )
-        .route("/groups/{group_id}/invites", post(groups::create_invite))
+        .route(
+            "/groups/{group_id}/invites",
+            get(groups::list_invites).post(groups::create_invite),
+        )
+        .route(
+            "/groups/{group_id}/invites/{code}",
+            delete(groups::delete_invite),
+        )
         .route("/invites/{code}/join", post(groups::join))
         .route(
             "/groups/{group_id}/roles",
@@ -55,6 +62,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/groups/{group_id}/categories",
             post(channels::create_category),
+        )
+        .route(
+            "/categories/{category_id}",
+            patch(channels::update_category).delete(channels::delete_category),
         )
         .route(
             "/groups/{group_id}/channels",

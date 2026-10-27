@@ -182,6 +182,85 @@ pub async fn create_category(
     Ok((StatusCode::CREATED, Json(category)))
 }
 
+/// Checks that a category belongs to the group.
+async fn category_group(state: &AppState, category_id: Uuid, group_id: Uuid) -> AppResult<()> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM categories WHERE id = $1 AND group_id = $2)",
+    )
+    .bind(category_id)
+    .bind(group_id)
+    .fetch_one(&state.db)
+    .await?;
+    if exists {
+        Ok(())
+    } else {
+        Err(AppError::bad_request("unknown category"))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateCategory {
+    pub name: Option<String>,
+    pub position: Option<i32>,
+    pub allow_user_channels: Option<bool>,
+}
+
+/// Loads the member for the group of a category and requires MANAGE_CHANNELS.
+async fn category_manager(state: &AppState, category_id: Uuid, user_id: Uuid) -> AppResult<Member> {
+    let group_id: Uuid = sqlx::query_scalar("SELECT group_id FROM categories WHERE id = $1")
+        .bind(category_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let member = Member::load(&state.db, group_id, user_id).await?;
+    member.require(Permissions::MANAGE_CHANNELS)?;
+    Ok(member)
+}
+
+pub async fn update_category(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(category_id): Path<Uuid>,
+    Json(req): Json<UpdateCategory>,
+) -> AppResult<Json<CategoryInfo>> {
+    let member = category_manager(&state, category_id, user.id).await?;
+    let name = req.name.as_deref().map(validate_name).transpose()?;
+    let category = sqlx::query_as(
+        "UPDATE categories SET name = COALESCE($2, name), position = COALESCE($3, position),
+                allow_user_channels = COALESCE($4, allow_user_channels)
+         WHERE id = $1 RETURNING id, name, position, allow_user_channels",
+    )
+    .bind(category_id)
+    .bind(name)
+    .bind(req.position)
+    .bind(req.allow_user_channels)
+    .fetch_one(&state.db)
+    .await?;
+    state
+        .events
+        .group(EventKind::GroupUpdated, member.group_id, &category);
+    Ok(Json(category))
+}
+
+/// Deletes a category; its channels stay, without a category.
+pub async fn delete_category(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(category_id): Path<Uuid>,
+) -> AppResult<StatusCode> {
+    let member = category_manager(&state, category_id, user.id).await?;
+    sqlx::query("DELETE FROM categories WHERE id = $1")
+        .bind(category_id)
+        .execute(&state.db)
+        .await?;
+    state.events.group(
+        EventKind::GroupUpdated,
+        member.group_id,
+        json!({ "category_id": category_id }),
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateChannel {
     pub name: String,
@@ -306,6 +385,18 @@ pub struct UpdateChannel {
     pub name: Option<String>,
     pub position: Option<i32>,
     pub voice_enabled: Option<bool>,
+    /// Missing: unchanged; null: no category; an id: move into that category.
+    #[serde(default, deserialize_with = "some")]
+    pub category_id: Option<Option<Uuid>>,
+}
+
+/// Lets a present `null` deserialize as `Some(None)`, unlike a missing field.
+fn some<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(d).map(Some)
 }
 
 pub async fn update(
@@ -319,9 +410,13 @@ pub async fn update(
         return Err(AppError::Forbidden);
     }
     let name = req.name.as_deref().map(validate_name).transpose()?;
+    if let Some(Some(category_id)) = req.category_id {
+        category_group(&state, category_id, member.group_id).await?;
+    }
     let channel = sqlx::query_as(concat!(
         "UPDATE channels SET name = COALESCE($2, name), position = COALESCE($3, position),
-                voice_enabled = COALESCE($4, voice_enabled)
+                voice_enabled = COALESCE($4, voice_enabled),
+                category_id = CASE WHEN $5 THEN $6 ELSE category_id END
          WHERE id = $1 RETURNING ",
         channel_columns!()
     ))
@@ -329,6 +424,8 @@ pub async fn update(
     .bind(name)
     .bind(req.position)
     .bind(req.voice_enabled)
+    .bind(req.category_id.is_some())
+    .bind(req.category_id.flatten())
     .fetch_one(&state.db)
     .await?;
     state.events.channel(

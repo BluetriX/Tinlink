@@ -135,16 +135,19 @@ serialized as flag names, e.g. `"VIEW_CHANNEL | SEND_MESSAGES"`.
 | GET | `/users/me` | Current user |
 | PUT | `/users/me/password` | Change password `{"current_password","new_password"}`, signs out other sessions |
 | GET, POST | `/groups` | My groups (with `unread` and `mention_count`), create a group |
-| GET, PATCH, DELETE | `/groups/{id}` | Group details (incl. my permissions), settings, delete (owner) |
+| GET, PATCH, DELETE | `/groups/{id}` | Group details (incl. my permissions and `my_position`), settings, delete (owner) |
 | GET | `/groups/{id}/members` | Members with role ids and `online` |
 | DELETE | `/groups/{id}/members/{user}` | Leave or kick |
 | PUT, DELETE | `/groups/{id}/members/{user}/roles/{role}` | Assign or remove a role |
-| POST | `/groups/{id}/invites`, `/invites/{code}/join` | Invites |
+| GET, POST | `/groups/{id}/invites` | Usable invites, create an invite (`max_uses`, `expires_in_hours`) |
+| DELETE | `/groups/{id}/invites/{code}` | Revoke an invite |
+| POST | `/invites/{code}/join` | Join with an invite |
 | GET, POST | `/groups/{id}/roles` | Roles |
 | PATCH, DELETE | `/groups/{id}/roles/{role}` | Edit or delete a role |
 | POST | `/groups/{id}/categories` | Create a category |
+| PATCH, DELETE | `/categories/{id}` | Edit a category, delete it (its channels stay, without category) |
 | GET, POST | `/groups/{id}/channels` | Visible channels with my permissions, create a channel |
-| PATCH, DELETE | `/channels/{id}` | Edit or delete a channel |
+| PATCH, DELETE | `/channels/{id}` | Edit (`name`, `position`, `voice_enabled`, `category_id`, null for none) or delete a channel |
 | GET | `/channels/{id}/overwrites` | Permission overwrites |
 | PUT, DELETE | `/channels/{id}/overwrites/{role\|member}/{target}` | Set or remove an overwrite |
 | GET, POST | `/channels/{id}/messages` | Chat history (`?before=&limit=`), send |
