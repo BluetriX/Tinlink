@@ -23,6 +23,7 @@ use crate::state::AppState;
 
 const SESSION_TTL: Duration = Duration::days(30);
 const MIN_PASSWORD_LEN: usize = 8;
+const MAX_DISPLAY_NAME_LEN: usize = 64;
 
 /// The authenticated user of a request, extracted from `Authorization: Bearer`.
 #[derive(Debug, Clone)]
@@ -86,7 +87,16 @@ pub struct UserInfo {
     pub id: Uuid,
     pub name: String,
     pub display_name: String,
+    /// Served at `/api/images/{avatar_id}`.
+    pub avatar_id: Option<Uuid>,
 }
+
+macro_rules! user_columns {
+    () => {
+        "id, name, display_name, avatar_id"
+    };
+}
+pub(crate) use user_columns;
 
 pub async fn register(
     State(state): State<AppState>,
@@ -108,17 +118,17 @@ pub async fn register(
             "password must have at least {MIN_PASSWORD_LEN} characters"
         )));
     }
-    let display_name = req
-        .display_name
-        .map(|d| d.trim().to_owned())
-        .filter(|d| !d.is_empty())
-        .unwrap_or_else(|| req.name.clone());
+    let display_name = match req.display_name.as_deref().map(str::trim) {
+        Some(d) if !d.is_empty() => validate_display_name(d)?,
+        _ => req.name.clone(),
+    };
     let password_hash = hash_password(req.password).await?;
 
-    let user: UserInfo = sqlx::query_as(
+    let user: UserInfo = sqlx::query_as(concat!(
         "INSERT INTO users (id, name, display_name, password_hash) VALUES ($1, $2, $3, $4)
-         RETURNING id, name, display_name",
-    )
+         RETURNING ",
+        user_columns!()
+    ))
     .bind(Uuid::now_v7())
     .bind(id.name())
     .bind(&display_name)
@@ -142,19 +152,21 @@ pub async fn login(
     if let Some(wait) = state.login_limiter.blocked_for(&key) {
         return Err(AppError::TooManyRequests(wait.as_secs()));
     }
-    let row: Option<(Uuid, String, String, String)> =
-        sqlx::query_as("SELECT id, name, display_name, password_hash FROM users WHERE name = $1")
-            .bind(req.name.to_ascii_lowercase())
-            .fetch_optional(&state.db)
-            .await?;
+    let row: Option<(Uuid, String, String, Option<Uuid>, String)> = sqlx::query_as(
+        "SELECT id, name, display_name, avatar_id, password_hash FROM users WHERE name = $1",
+    )
+    .bind(req.name.to_ascii_lowercase())
+    .fetch_optional(&state.db)
+    .await?;
     // Verify against a dummy hash for unknown users to keep timing similar.
     let (stored_hash, user) = match row {
-        Some((id, name, display_name, hash)) => (
+        Some((id, name, display_name, avatar_id, hash)) => (
             hash,
             Some(UserInfo {
                 id,
                 name,
                 display_name,
+                avatar_id,
             }),
         ),
         None => (DUMMY_HASH.clone(), None),
@@ -184,10 +196,55 @@ pub async fn logout(State(state): State<AppState>, headers: HeaderMap) -> AppRes
 }
 
 pub async fn me(State(state): State<AppState>, user: AuthUser) -> AppResult<Json<UserInfo>> {
-    let info = sqlx::query_as("SELECT id, name, display_name FROM users WHERE id = $1")
-        .bind(user.id)
-        .fetch_one(&state.db)
-        .await?;
+    let info = sqlx::query_as(concat!(
+        "SELECT ",
+        user_columns!(),
+        " FROM users WHERE id = $1"
+    ))
+    .bind(user.id)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(Json(info))
+}
+
+fn validate_display_name(name: &str) -> AppResult<String> {
+    let name = name.trim();
+    if name.is_empty()
+        || name.chars().count() > MAX_DISPLAY_NAME_LEN
+        || name.chars().any(char::is_control)
+    {
+        return Err(AppError::bad_request(format!(
+            "display name must be 1-{MAX_DISPLAY_NAME_LEN} characters"
+        )));
+    }
+    Ok(name.to_owned())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateMe {
+    pub display_name: Option<String>,
+}
+
+/// Edits the caller's profile. The avatar is set via `/users/me/avatar`.
+pub async fn update_me(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Json(req): Json<UpdateMe>,
+) -> AppResult<Json<UserInfo>> {
+    let display_name = req
+        .display_name
+        .as_deref()
+        .map(validate_display_name)
+        .transpose()?;
+    let info: UserInfo = sqlx::query_as(concat!(
+        "UPDATE users SET display_name = COALESCE($2, display_name) WHERE id = $1 RETURNING ",
+        user_columns!()
+    ))
+    .bind(user.id)
+    .bind(display_name)
+    .fetch_one(&state.db)
+    .await?;
+    state.events.user_updated(&info);
     Ok(Json(info))
 }
 

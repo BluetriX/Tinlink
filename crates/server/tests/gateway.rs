@@ -302,3 +302,19 @@ async fn typing_and_direct_messages_reach_only_those_with_access(db: PgPool) {
         .unwrap();
     assert!(next_of(&mut owner_ws, "typing").await.is_none());
 }
+
+#[sqlx::test(migrator = "tinlink_server::MIGRATOR")]
+async fn profile_changes_reach_other_users(db: PgPool) {
+    let app = TestApp::new(db);
+    let addr = app.spawn().await;
+    let (owner, owner_id) = app.register("owner").await;
+    let (alice, _) = app.register("alice").await;
+    let mut ws = connect(addr, &alice).await;
+
+    app.patch("/api/users/me", &owner, json!({"display_name": "Boss"}))
+        .await;
+    let event = next_json(&mut ws).await.expect("user_updated");
+    assert_eq!(event["type"], "user_updated");
+    assert_eq!(event["user_id"], owner_id.as_str());
+    assert_eq!(event["data"]["display_name"], "Boss");
+}

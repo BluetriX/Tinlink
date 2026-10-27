@@ -183,6 +183,9 @@ async fn should_deliver(
     groups: &mut HashSet<Uuid>,
     event: &Event,
 ) -> bool {
+    if event.kind == EventKind::UserUpdated {
+        return true;
+    }
     let Some(group_id) = event.group_id else {
         // Direct message channels: only the two participants.
         return match event.channel_id {

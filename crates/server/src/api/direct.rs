@@ -17,6 +17,7 @@ pub struct DirectUser {
     pub id: Uuid,
     pub name: String,
     pub display_name: String,
+    pub avatar_id: Option<Uuid>,
     pub online: bool,
 }
 
@@ -31,11 +32,20 @@ pub struct DirectChannel {
     pub unread_count: i64,
 }
 
-type Row = (Uuid, Uuid, String, String, Option<Uuid>, Option<Uuid>, i64);
+type Row = (
+    Uuid,
+    Uuid,
+    String,
+    String,
+    Option<Uuid>,
+    Option<Uuid>,
+    Option<Uuid>,
+    i64,
+);
 
 /// The caller's direct message channels; `$2` optionally limits it to one.
 const SELECT: &str = "
-    SELECT d.channel_id, u.id, u.name, u.display_name,
+    SELECT d.channel_id, u.id, u.name, u.display_name, u.avatar_id,
            (SELECT m.id FROM messages m WHERE m.channel_id = d.channel_id ORDER BY m.id DESC LIMIT 1)
                AS last_message_id,
            r.last_read_id,
@@ -49,13 +59,15 @@ const SELECT: &str = "
     ORDER BY last_message_id DESC NULLS LAST";
 
 fn to_channel(state: &AppState, row: Row) -> DirectChannel {
-    let (id, user_id, name, display_name, last_message_id, last_read_id, unread_count) = row;
+    let (id, user_id, name, display_name, avatar_id, last_message_id, last_read_id, unread_count) =
+        row;
     DirectChannel {
         id,
         user: DirectUser {
             id: user_id,
             name,
             display_name,
+            avatar_id,
             online: state.presence.is_online(user_id),
         },
         last_message_id,

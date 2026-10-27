@@ -4,6 +4,7 @@ mod attachments;
 mod channels;
 mod direct;
 mod groups;
+mod images;
 mod messages;
 mod roles;
 mod voice;
@@ -21,7 +22,9 @@ pub fn router() -> Router<AppState> {
         .route("/auth/register", post(auth::register))
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
-        .route("/users/me", get(auth::me))
+        .route("/users/me", get(auth::me).patch(auth::update_me))
+        .route("/users/me/avatar", put(images::set_avatar))
+        .route("/images/{id}", get(images::get))
         .route("/users/me/password", put(auth::change_password))
         .route("/info", get(info))
         .route("/dms", get(direct::list).post(direct::open))
@@ -33,6 +36,7 @@ pub fn router() -> Router<AppState> {
                 .patch(groups::update)
                 .delete(groups::delete),
         )
+        .route("/groups/{group_id}/icon", put(images::set_group_icon))
         .route("/groups/{group_id}/members", get(groups::list_members))
         .route(
             "/groups/{group_id}/members/{user_id}",
@@ -75,6 +79,7 @@ pub fn router() -> Router<AppState> {
             "/channels/{channel_id}",
             patch(channels::update).delete(channels::delete),
         )
+        .route("/channels/{channel_id}/icon", put(images::set_channel_icon))
         .route(
             "/channels/{channel_id}/overwrites",
             get(channels::list_overwrites),

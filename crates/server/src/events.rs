@@ -39,6 +39,9 @@ pub enum EventKind {
     PresenceChanged,
     /// `user_id` is typing in the channel; clients show it for a few seconds.
     Typing,
+    /// A user changed their display name or avatar; `data` is the user.
+    /// Sent to every connected user, like the profile it describes.
+    UserUpdated,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -109,6 +112,16 @@ impl EventHub {
             channel_id: Some(channel_id),
             user_id: None,
             data: serde_json::to_value(data).unwrap_or(Value::Null),
+        });
+    }
+
+    pub fn user_updated(&self, user: &crate::auth::UserInfo) {
+        self.publish(Event {
+            kind: EventKind::UserUpdated,
+            group_id: None,
+            channel_id: None,
+            user_id: Some(user.id),
+            data: serde_json::to_value(user).unwrap_or(Value::Null),
         });
     }
 

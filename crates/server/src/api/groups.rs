@@ -22,7 +22,16 @@ pub struct GroupInfo {
     pub name: String,
     pub owner_id: Uuid,
     pub user_channel_limit: i32,
+    /// Served at `/api/images/{icon_id}`.
+    pub icon_id: Option<Uuid>,
 }
+
+macro_rules! group_columns {
+    () => {
+        "id, name, owner_id, user_channel_limit, icon_id"
+    };
+}
+pub(crate) use group_columns;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateGroup {
@@ -51,10 +60,10 @@ pub async fn create(
     let everyone = Permissions::DEFAULT_EVERYONE | Permissions::CREATE_OWN_CHANNELS;
 
     let mut tx = state.db.begin().await?;
-    let group: GroupInfo = sqlx::query_as(
-        "INSERT INTO groups (id, name, owner_id) VALUES ($1, $2, $3)
-         RETURNING id, name, owner_id, user_channel_limit",
-    )
+    let group: GroupInfo = sqlx::query_as(concat!(
+        "INSERT INTO groups (id, name, owner_id) VALUES ($1, $2, $3) RETURNING ",
+        group_columns!()
+    ))
     .bind(group_id)
     .bind(&name)
     .bind(user.id)
@@ -106,7 +115,7 @@ pub async fn list_mine(
     user: AuthUser,
 ) -> AppResult<Json<Vec<MyGroup>>> {
     let groups: Vec<GroupInfo> = sqlx::query_as(
-        "SELECT g.id, g.name, g.owner_id, g.user_channel_limit FROM groups g
+        "SELECT g.id, g.name, g.owner_id, g.user_channel_limit, g.icon_id FROM groups g
          JOIN members m ON m.group_id = g.id WHERE m.user_id = $1 ORDER BY g.name",
     )
     .bind(user.id)
@@ -170,11 +179,14 @@ pub async fn get(
     Path(group_id): Path<Uuid>,
 ) -> AppResult<Json<GroupDetail>> {
     let member = Member::load(&state.db, group_id, user.id).await?;
-    let group =
-        sqlx::query_as("SELECT id, name, owner_id, user_channel_limit FROM groups WHERE id = $1")
-            .bind(group_id)
-            .fetch_one(&state.db)
-            .await?;
+    let group = sqlx::query_as(concat!(
+        "SELECT ",
+        group_columns!(),
+        " FROM groups WHERE id = $1"
+    ))
+    .bind(group_id)
+    .fetch_one(&state.db)
+    .await?;
     Ok(Json(GroupDetail {
         group,
         permissions: member.group_permissions(),
@@ -204,10 +216,11 @@ pub async fn update(
     {
         return Err(AppError::bad_request("user_channel_limit must be 0-50"));
     }
-    let group = sqlx::query_as(
+    let group = sqlx::query_as(concat!(
         "UPDATE groups SET name = COALESCE($2, name), user_channel_limit = COALESCE($3, user_channel_limit)
-         WHERE id = $1 RETURNING id, name, owner_id, user_channel_limit",
-    )
+         WHERE id = $1 RETURNING ",
+        group_columns!()
+    ))
     .bind(group_id)
     .bind(name)
     .bind(req.user_channel_limit)
@@ -241,6 +254,7 @@ pub struct MemberInfo {
     pub user_id: Uuid,
     pub name: String,
     pub display_name: String,
+    pub avatar_id: Option<Uuid>,
     pub role_ids: Vec<Uuid>,
     #[sqlx(skip)]
     pub online: bool,
@@ -253,7 +267,7 @@ pub async fn list_members(
 ) -> AppResult<Json<Vec<MemberInfo>>> {
     Member::load(&state.db, group_id, user.id).await?;
     let mut members: Vec<MemberInfo> = sqlx::query_as(
-        "SELECT u.id AS user_id, u.name, u.display_name,
+        "SELECT u.id AS user_id, u.name, u.display_name, u.avatar_id,
                 COALESCE(array_agg(mr.role_id) FILTER (WHERE mr.role_id IS NOT NULL), '{}') AS role_ids
          FROM members m JOIN users u ON u.id = m.user_id
          LEFT JOIN member_roles mr ON mr.group_id = m.group_id AND mr.user_id = m.user_id
@@ -419,11 +433,14 @@ pub async fn join(
             .execute(&mut *tx)
             .await?;
     }
-    let group =
-        sqlx::query_as("SELECT id, name, owner_id, user_channel_limit FROM groups WHERE id = $1")
-            .bind(group_id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let group = sqlx::query_as(concat!(
+        "SELECT ",
+        group_columns!(),
+        " FROM groups WHERE id = $1"
+    ))
+    .bind(group_id)
+    .fetch_one(&mut *tx)
+    .await?;
     tx.commit().await?;
     if !already_member {
         state

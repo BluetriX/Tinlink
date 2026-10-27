@@ -75,6 +75,16 @@ pub async fn sweep(
         }
     }
     files::remove_unreferenced(state, attachment_age).await?;
+    // Icons of deleted groups and channels; replaced ones are removed directly.
+    sqlx::query(
+        "DELETE FROM images i WHERE i.created_at < now() - make_interval(secs => $1)
+           AND NOT EXISTS (SELECT 1 FROM users WHERE avatar_id = i.id)
+           AND NOT EXISTS (SELECT 1 FROM groups WHERE icon_id = i.id)
+           AND NOT EXISTS (SELECT 1 FROM channels WHERE icon_id = i.id)",
+    )
+    .bind(attachment_age.as_secs_f64())
+    .execute(&state.db)
+    .await?;
     Ok(())
 }
 

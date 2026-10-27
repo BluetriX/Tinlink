@@ -33,6 +33,10 @@ pub struct ChannelRow {
     pub voice_enabled: bool,
     pub created_by: Option<Uuid>,
     pub temporary: bool,
+    /// Served at `/api/images/{icon_id}`.
+    pub icon_id: Option<Uuid>,
+    /// Shown instead of `#` when there is no icon image.
+    pub emoji: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,9 +76,10 @@ pub struct VoiceParticipant {
 
 macro_rules! channel_columns {
     () => {
-        "id, group_id, category_id, name, position, voice_enabled, created_by, temporary"
+        "id, group_id, category_id, name, position, voice_enabled, created_by, temporary, icon_id, emoji"
     };
 }
+pub(crate) use channel_columns;
 
 /// Lists categories and the channels the caller can see.
 pub async fn list(
@@ -388,6 +393,22 @@ pub struct UpdateChannel {
     /// Missing: unchanged; null: no category; an id: move into that category.
     #[serde(default, deserialize_with = "some")]
     pub category_id: Option<Option<Uuid>>,
+    /// Missing: unchanged; null or empty: no emoji.
+    #[serde(default, deserialize_with = "some")]
+    pub emoji: Option<Option<String>>,
+}
+
+const MAX_EMOJI_CHARS: usize = 8;
+
+fn validate_emoji(emoji: Option<&str>) -> AppResult<Option<String>> {
+    let emoji = emoji.map(str::trim).filter(|e| !e.is_empty());
+    if emoji.is_some_and(|e| e.chars().count() > MAX_EMOJI_CHARS || e.chars().any(char::is_control))
+    {
+        return Err(AppError::bad_request(format!(
+            "emoji must be at most {MAX_EMOJI_CHARS} characters"
+        )));
+    }
+    Ok(emoji.map(str::to_owned))
 }
 
 /// Lets a present `null` deserialize as `Some(None)`, unlike a missing field.
@@ -413,10 +434,12 @@ pub async fn update(
     if let Some(Some(category_id)) = req.category_id {
         category_group(&state, category_id, member.group_id).await?;
     }
+    let emoji = validate_emoji(req.emoji.clone().flatten().as_deref())?;
     let channel = sqlx::query_as(concat!(
         "UPDATE channels SET name = COALESCE($2, name), position = COALESCE($3, position),
                 voice_enabled = COALESCE($4, voice_enabled),
-                category_id = CASE WHEN $5 THEN $6 ELSE category_id END
+                category_id = CASE WHEN $5 THEN $6 ELSE category_id END,
+                emoji = CASE WHEN $7 THEN $8 ELSE emoji END
          WHERE id = $1 RETURNING ",
         channel_columns!()
     ))
@@ -426,6 +449,8 @@ pub async fn update(
     .bind(req.voice_enabled)
     .bind(req.category_id.is_some())
     .bind(req.category_id.flatten())
+    .bind(req.emoji.is_some())
+    .bind(emoji)
     .fetch_one(&state.db)
     .await?;
     state.events.channel(
