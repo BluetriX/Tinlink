@@ -253,6 +253,8 @@ function renderEmptyGroup() {
   state.group = null;
   $("group-name").textContent = "No group yet";
   $("group-invite").hidden = true;
+  $("group-settings").hidden = true;
+  closeSettings();
   $("channel-tree").replaceChildren(
     el("p", { class: "muted", style: "padding: 0 12px", textContent: "Create a group or join one with an invite code (+ on the left)." }),
   );
@@ -408,6 +410,7 @@ async function selectGroup(id) {
     run(() => api("GET", `/groups/${id}/channels`)),
   ]);
   if (!group) return;
+  closeSettings();
   state.view = "group";
   state.group = group;
   renderDmBadge();
@@ -417,6 +420,7 @@ async function selectGroup(id) {
   renderGroups();
   $("group-name").textContent = group.name;
   $("group-invite").hidden = !can(group.permissions, "MANAGE_GROUP");
+  updateSettingsButton();
   const saved = settings.load().channels || {};
   const channel = state.channels.find((c) => c.id === saved[id]) || state.channels[0] || null;
   openChannel(channel);
@@ -448,6 +452,7 @@ function refreshGroup() {
     if (state.group?.id !== id || !group) return;
     state.group = group;
     if (state.view === "group") $("group-name").textContent = group.name;
+    updateSettingsButton();
     setMembers(members || []);
     setChannels(channels);
     if (state.channel && !state.channel.dm && !state.channels.some((c) => c.id === state.channel.id)) {
@@ -542,6 +547,7 @@ function renderDmList() {
 /** Switches the sidebar to the direct message list. */
 async function showDms(openId) {
   state.view = "dms";
+  updateSettingsButton();
   $("group-name").textContent = "Direct messages";
   $("group-invite").hidden = true;
   renderGroups();
@@ -839,6 +845,7 @@ async function createChannel(category) {
 function openChannel(ch) {
   state.channel = ch;
   clearTyping();
+  closeSettings();
   closeSearch();
   state.messages = [];
   state.noOlder = false;
@@ -1143,6 +1150,400 @@ $("composer").addEventListener("submit", async (ev) => {
     $("composer").querySelector("button[type=submit]").disabled = false;
   }
 });
+
+// --------------------------------------------------------- group settings
+// Admin UI for roles, members, channels and group settings. The server
+// checks every change (role hierarchy, grants); errors show in the status line.
+
+const PERMISSIONS = [
+  ["VIEW_CHANNEL", "View channels"],
+  ["SEND_MESSAGES", "Send messages"],
+  ["ATTACH_FILES", "Attach files"],
+  ["CONNECT", "Join voice"],
+  ["SPEAK", "Speak"],
+  ["SHARE_SCREEN", "Share screen"],
+  ["CREATE_OWN_CHANNELS", "Create own rooms"],
+  ["MANAGE_CHANNELS", "Manage channels"],
+  ["MANAGE_MESSAGES", "Delete others' messages"],
+  ["MUTE_MEMBERS", "Mute members in voice"],
+  ["MOVE_MEMBERS", "Move and disconnect in voice"],
+  ["KICK_MEMBERS", "Kick members"],
+  ["BAN_MEMBERS", "Ban members"],
+  ["MANAGE_ROLES", "Manage roles"],
+  ["MANAGE_GROUP", "Manage group and invites"],
+  ["ADMINISTRATOR", "Administrator (all permissions)"],
+];
+/** Permissions that make sense per channel (overwrites). */
+const CHANNEL_PERMISSIONS = PERMISSIONS.filter(([flag]) => [
+  "VIEW_CHANNEL", "SEND_MESSAGES", "ATTACH_FILES", "CONNECT", "SPEAK", "SHARE_SCREEN",
+  "MANAGE_MESSAGES", "MUTE_MEMBERS", "MOVE_MEMBERS",
+].includes(flag));
+
+const flagSet = (perms) => new Set((perms || "").split("|").map((p) => p.trim()).filter(Boolean));
+const joinFlags = (set) => [...set].join(" | ");
+
+const admin = { tab: "general", roles: [], roleId: null, overwriteChannel: null };
+
+function canAdmin(flag) {
+  return can(state.group?.permissions, flag);
+}
+
+function isOwner() {
+  return state.group?.owner_id === myId();
+}
+
+/** Shows the gear button when the user may change anything in the group. */
+function updateSettingsButton() {
+  const any = ["MANAGE_GROUP", "MANAGE_ROLES", "MANAGE_CHANNELS", "KICK_MEMBERS"].some(canAdmin);
+  $("group-settings").hidden = state.view !== "group" || !any;
+  if ($("group-settings").hidden) closeSettings();
+}
+
+function openSettings(tab) {
+  admin.tab = tab || admin.tab;
+  $("chat").hidden = true;
+  $("settings-view").hidden = false;
+  $("settings-title").textContent = `${state.group.name} – settings`;
+  renderSettings();
+}
+
+function closeSettings() {
+  $("settings-view").hidden = true;
+  $("chat").hidden = false;
+}
+
+async function renderSettings() {
+  const tabs = [
+    ["general", "General", canAdmin("MANAGE_GROUP") || isOwner()],
+    ["roles", "Roles", canAdmin("MANAGE_ROLES")],
+    ["members", "Members", canAdmin("MANAGE_ROLES") || canAdmin("KICK_MEMBERS")],
+    ["channels", "Channels", canAdmin("MANAGE_CHANNELS")],
+  ].filter(([, , allowed]) => allowed);
+  if (!tabs.some(([id]) => id === admin.tab)) admin.tab = tabs[0]?.[0];
+  $("settings-tabs").replaceChildren(...tabs.map(([id, label]) => el("button", {
+    type: "button", class: `small${id === admin.tab ? " active" : ""}`, textContent: label,
+    onclick: () => { admin.tab = id; renderSettings(); },
+  })));
+  const body = $("settings-body");
+  if (admin.tab === "general") body.replaceChildren(...settingsGeneral());
+  else if (admin.tab === "roles") body.replaceChildren(...(await settingsRoles()));
+  else if (admin.tab === "members") body.replaceChildren(...(await settingsMembers()));
+  else if (admin.tab === "channels") body.replaceChildren(...settingsChannels());
+}
+
+/** Reloads group data after a change, then redraws the open tab. */
+async function settingsChanged(message) {
+  if (message) setStatus(message);
+  const id = state.group.id;
+  const [group, members, channels] = await Promise.all([
+    run(() => api("GET", `/groups/${id}`)),
+    run(() => api("GET", `/groups/${id}/members`)),
+    run(() => api("GET", `/groups/${id}/channels`)),
+  ]);
+  if (!group || state.group?.id !== id) return;
+  state.group = group;
+  $("group-name").textContent = group.name;
+  setMembers(members || []);
+  setChannels(channels);
+  loadGroups();
+  updateSettingsButton();
+  if (!$("settings-view").hidden) renderSettings();
+}
+
+function section(title, ...children) {
+  return el("section", { class: "settings-section" }, el("h3", { textContent: title }), ...children);
+}
+
+// General -----------------------------------------------------------------
+
+function settingsGeneral() {
+  const g = state.group;
+  const name = el("input", { value: g.name, maxLength: 64 });
+  const limit = el("input", { type: "number", min: 0, max: 50, value: g.user_channel_limit ?? 0 });
+  const parts = [];
+  if (canAdmin("MANAGE_GROUP")) {
+    parts.push(section("Group",
+      el("label", {}, "Name", name),
+      el("label", {}, "Own rooms per member (0 = none)", limit),
+      el("button", {
+        type: "button", class: "primary", textContent: "Save",
+        onclick: async () => {
+          const body = { name: name.value.trim(), user_channel_limit: Number(limit.value) };
+          if (await run(() => api("PATCH", `/groups/${g.id}`, body))) settingsChanged("Group saved");
+        },
+      })));
+    parts.push(section("Invites",
+      el("p", { class: "muted", textContent: "Create a code and send it to the people you want to invite." }),
+      el("button", { type: "button", textContent: "Create invite code", onclick: () => $("group-invite").click() })));
+  }
+  if (isOwner()) {
+    parts.push(section("Delete group",
+      el("p", { class: "muted", textContent: "Deletes all channels, messages and files of this group. This cannot be undone." }),
+      el("button", {
+        type: "button", class: "danger", textContent: "Delete group…",
+        onclick: async () => {
+          const done = await ask({
+            title: "Delete group?",
+            text: `Type the group name "${g.name}" to confirm.`,
+            fields: [{ id: "name", label: "Group name" }],
+            ok: "Delete",
+            submit: (v) => v.name !== g.name ? "The name does not match."
+              : tryText(() => api("DELETE", `/groups/${g.id}`)),
+          });
+          if (!done) return;
+          closeSettings();
+          await loadGroups();
+          if (state.groups[0]) selectGroup(state.groups[0].id);
+          else renderEmptyGroup();
+          setStatus("Group deleted");
+        },
+      })));
+  }
+  return parts;
+}
+
+// Roles -------------------------------------------------------------------
+
+async function loadRoles() {
+  admin.roles = ((await run(() => api("GET", `/groups/${state.group.id}/roles`))) || [])
+    .sort((a, b) => b.position - a.position);
+  if (!admin.roles.some((r) => r.id === admin.roleId)) admin.roleId = admin.roles[0]?.id || null;
+}
+
+async function settingsRoles() {
+  await loadRoles();
+  const list = el("div", { class: "role-list" },
+    ...admin.roles.map((r) => el("button", {
+      type: "button", class: `role-item${r.id === admin.roleId ? " active" : ""}`,
+      textContent: r.name,
+      onclick: () => { admin.roleId = r.id; renderSettings(); },
+    })),
+    el("button", {
+      type: "button", class: "small", textContent: "+ New role",
+      onclick: async () => {
+        const v = await ask({ title: "New role", fields: [{ id: "name", label: "Name" }], submit: (x) => (x.name ? null : "Enter a name.") });
+        if (!v) return;
+        const role = await run(() => api("POST", `/groups/${state.group.id}/roles`, { name: v.name, permissions: "" }));
+        if (role) {
+          admin.roleId = role.id;
+          settingsChanged(`Role ${role.name} created`);
+        }
+      },
+    }));
+  const role = admin.roles.find((r) => r.id === admin.roleId);
+  return [el("div", { class: "settings-split" }, list, role ? roleEditor(role) : el("p", { class: "muted", textContent: "No roles." }))];
+}
+
+function roleEditor(role) {
+  const name = el("input", { value: role.name, maxLength: 64, disabled: role.everyone });
+  const granted = flagSet(role.permissions);
+  const boxes = PERMISSIONS.map(([flag, label]) => {
+    const box = el("input", { type: "checkbox", checked: granted.has(flag) });
+    box.dataset.flag = flag;
+    return el("label", { class: "inline perm" }, box, ` ${label}`);
+  });
+  const index = admin.roles.findIndex((r) => r.id === role.id);
+  const above = admin.roles[index - 1];
+  const below = admin.roles[index + 1];
+  const swap = async (other) => {
+    if (!other || other.everyone) return;
+    const ok = await run(async () => {
+      await api("PATCH", `/groups/${state.group.id}/roles/${role.id}`, { position: other.position });
+      await api("PATCH", `/groups/${state.group.id}/roles/${other.id}`, { position: role.position });
+      return true;
+    });
+    if (ok) settingsChanged("Role order changed");
+  };
+  return el("div", { class: "role-editor" },
+    el("label", {}, "Name", name),
+    role.everyone ? el("p", { class: "muted", textContent: "@everyone applies to all members of the group." }) : null,
+    el("div", { class: "perm-grid" }, ...boxes),
+    el("div", { class: "row" },
+      el("button", {
+        type: "button", class: "primary", textContent: "Save",
+        onclick: async () => {
+          const perms = new Set(boxes.map((b) => b.querySelector("input")).filter((b) => b.checked).map((b) => b.dataset.flag));
+          const body = { permissions: joinFlags(perms) };
+          if (!role.everyone) body.name = name.value.trim();
+          if (await run(() => api("PATCH", `/groups/${state.group.id}/roles/${role.id}`, body))) settingsChanged(`Role ${body.name || role.name} saved`);
+        },
+      }),
+      role.everyone ? null : el("button", { type: "button", textContent: "Move up", disabled: !above, onclick: () => swap(above) }),
+      role.everyone ? null : el("button", { type: "button", textContent: "Move down", disabled: !below || below.everyone, onclick: () => swap(below) }),
+      role.everyone ? null : el("button", {
+        type: "button", class: "danger", textContent: "Delete",
+        onclick: async () => {
+          if (!(await ask({ title: `Delete role ${role.name}?`, text: "Members lose the permissions of this role.", ok: "Delete" }))) return;
+          if ((await run(() => api("DELETE", `/groups/${state.group.id}/roles/${role.id}`))) !== undefined) {
+            admin.roleId = null;
+            settingsChanged("Role deleted");
+          }
+        },
+      })));
+}
+
+// Members -----------------------------------------------------------------
+
+async function settingsMembers() {
+  await loadRoles();
+  const roles = admin.roles.filter((r) => !r.everyone);
+  const members = [...state.members.values()].sort((a, b) => (a.display_name || a.name).localeCompare(b.display_name || b.name));
+  const rows = members.map((m) => {
+    const owner = m.user_id === state.group.owner_id;
+    const chips = roles.map((r) => {
+      const box = el("input", { type: "checkbox", checked: (m.role_ids || []).includes(r.id), disabled: !canAdmin("MANAGE_ROLES") });
+      box.addEventListener("change", async () => {
+        const path = `/groups/${state.group.id}/members/${m.user_id}/roles/${r.id}`;
+        const ok = await run(() => api(box.checked ? "PUT" : "DELETE", path));
+        if (ok === undefined) box.checked = !box.checked;
+        else settingsChanged(`${m.display_name || m.name}: ${box.checked ? "added to" : "removed from"} ${r.name}`);
+      });
+      return el("label", { class: "inline chip" }, box, ` ${r.name}`);
+    });
+    return el("div", { class: "member-row" },
+      el("span", { class: `dot${m.online ? " online" : ""}` }),
+      el("span", { class: "member-name", textContent: m.display_name || m.name, title: `@${m.name}` }),
+      owner ? el("span", { class: "badge", textContent: "owner" }) : null,
+      el("span", { class: "chips" }, ...chips),
+      canAdmin("KICK_MEMBERS") && !owner && m.user_id !== myId() ? el("button", {
+        type: "button", class: "small danger", textContent: "Kick",
+        onclick: async () => {
+          if (!(await ask({ title: `Remove ${m.display_name || m.name} from the group?`, text: "They can come back with a new invite.", ok: "Kick" }))) return;
+          if ((await run(() => api("DELETE", `/groups/${state.group.id}/members/${m.user_id}`))) !== undefined) settingsChanged("Member removed");
+        },
+      }) : null);
+  });
+  return [section("Members", roles.length ? null : el("p", { class: "muted", textContent: "Create roles in the Roles tab to give members extra permissions." }), ...rows)];
+}
+
+// Channels ----------------------------------------------------------------
+
+function settingsChannels() {
+  const g = state.group;
+  const categoryName = (id) => state.categories.find((c) => c.id === id)?.name || "No category";
+  const rows = state.channels.map((ch) => {
+    const name = el("input", { value: ch.name, maxLength: 64 });
+    const voice = el("input", { type: "checkbox", checked: ch.voice_enabled });
+    const row = el("div", { class: "channel-row" },
+      el("span", { class: "muted category-name", textContent: categoryName(ch.category_id) }),
+      name,
+      el("label", { class: "inline" }, voice, " Voice"),
+      el("button", {
+        type: "button", class: "small", textContent: "Save",
+        onclick: async () => {
+          const body = { name: name.value.trim(), voice_enabled: voice.checked };
+          if (await run(() => api("PATCH", `/channels/${ch.id}`, body))) settingsChanged(`#${body.name} saved`);
+        },
+      }),
+      el("button", {
+        type: "button", class: "small", textContent: "Permissions",
+        onclick: () => {
+          admin.overwriteChannel = admin.overwriteChannel === ch.id ? null : ch.id;
+          renderSettings();
+        },
+      }),
+      el("button", {
+        type: "button", class: "small danger", textContent: "Delete",
+        onclick: async () => {
+          if (!(await ask({ title: `Delete #${ch.name}?`, text: "All messages and files in it are deleted.", ok: "Delete" }))) return;
+          if ((await run(() => api("DELETE", `/channels/${ch.id}`))) !== undefined) settingsChanged(`#${ch.name} deleted`);
+        },
+      }));
+    if (admin.overwriteChannel !== ch.id) return row;
+    const editor = el("div", { class: "overwrite-editor" }, el("p", { class: "muted", textContent: "Loading…" }));
+    overwriteEditor(ch, editor);
+    return el("div", {}, row, editor);
+  });
+  const newName = el("input", { placeholder: "Channel name", maxLength: 64 });
+  const newCategory = el("select", {},
+    el("option", { value: "", textContent: "No category" }),
+    ...state.categories.map((c) => el("option", { value: c.id, textContent: c.name })));
+  const newVoice = el("input", { type: "checkbox", checked: true });
+  const catName = el("input", { placeholder: "Category name", maxLength: 64 });
+  const catRooms = el("input", { type: "checkbox" });
+  return [
+    section("Channels", ...rows),
+    section("New channel", el("div", { class: "row" },
+      newName, newCategory, el("label", { class: "inline" }, newVoice, " Voice"),
+      el("button", {
+        type: "button", class: "primary", textContent: "Create",
+        onclick: async () => {
+          const body = { name: newName.value.trim(), category_id: newCategory.value || null, voice_enabled: newVoice.checked };
+          if (!body.name) return setStatus("Enter a channel name", true);
+          if (await run(() => api("POST", `/groups/${g.id}/channels`, body))) settingsChanged(`#${body.name} created`);
+        },
+      }))),
+    section("New category", el("div", { class: "row" },
+      catName, el("label", { class: "inline" }, catRooms, " Members may create own rooms here"),
+      el("button", {
+        type: "button", class: "primary", textContent: "Create",
+        onclick: async () => {
+          const body = { name: catName.value.trim(), allow_user_channels: catRooms.checked, position: state.categories.length + 1 };
+          if (!body.name) return setStatus("Enter a category name", true);
+          if (await run(() => api("POST", `/groups/${g.id}/categories`, body))) settingsChanged(`Category ${body.name} created`);
+        },
+      }))),
+  ];
+}
+
+/** Per-channel allow/deny for one role or member at a time. */
+async function overwriteEditor(ch, container) {
+  const list = (await run(() => api("GET", `/channels/${ch.id}/overwrites`))) || [];
+  await loadRoles();
+  const targets = [
+    // @everyone first: the most common place to restrict a channel.
+    ...[...admin.roles].sort((a, b) => b.everyone - a.everyone)
+      .map((r) => ({ kind: "role", id: r.id, label: `Role: ${r.name}` })),
+    ...[...state.members.values()].map((m) => ({ kind: "member", id: m.user_id, label: `Member: ${m.display_name || m.name}` })),
+  ];
+  const has = (t) => list.some((o) => o.target.kind === t.kind && o.target.id === t.id);
+  const picker = el("select", {}, ...targets.map((t, i) => el("option", {
+    value: String(i), textContent: `${t.label}${has(t) ? " (customised)" : ""}`,
+  })));
+  const firstCustom = targets.findIndex(has);
+  picker.value = String(firstCustom >= 0 ? firstCustom : 0);
+  const grid = el("div", { class: "overwrite-grid" });
+  const draw = () => {
+    const t = targets[Number(picker.value)];
+    const o = list.find((x) => x.target.kind === t.kind && x.target.id === t.id);
+    const allow = flagSet(o?.allow);
+    const deny = flagSet(o?.deny);
+    grid.replaceChildren(...CHANNEL_PERMISSIONS.map(([flag, label]) => {
+      const value = allow.has(flag) ? "allow" : deny.has(flag) ? "deny" : "inherit";
+      const group = `ow-${flag}`;
+      return el("div", { class: "overwrite-row", dataset: { flag } },
+        el("span", { textContent: label }),
+        ...["inherit", "allow", "deny"].map((v) => el("label", { class: `inline ow-${v}` },
+          el("input", { type: "radio", name: group, value: v, checked: v === value }), ` ${v}`)));
+    }));
+  };
+  picker.addEventListener("change", draw);
+  draw();
+  container.replaceChildren(
+    el("p", { class: "muted", textContent: "Allow or deny permissions in this channel; inherit uses the roles." }),
+    picker, grid,
+    el("button", {
+      type: "button", class: "primary", textContent: "Save permissions",
+      onclick: async () => {
+        const t = targets[Number(picker.value)];
+        const allow = new Set();
+        const deny = new Set();
+        for (const row of grid.querySelectorAll(".overwrite-row")) {
+          const v = row.querySelector("input:checked").value;
+          if (v === "allow") allow.add(row.dataset.flag);
+          if (v === "deny") deny.add(row.dataset.flag);
+        }
+        const path = `/channels/${ch.id}/overwrites/${t.kind}/${t.id}`;
+        const ok = allow.size || deny.size
+          ? await run(() => api("PUT", path, { allow: joinFlags(allow), deny: joinFlags(deny) }))
+          : await run(() => api("DELETE", path));
+        if (ok !== undefined) settingsChanged(`Permissions of #${ch.name} saved`);
+      },
+    }));
+}
+
+$("group-settings").addEventListener("click", () => openSettings());
+$("settings-close").addEventListener("click", closeSettings);
 
 // ---------------------------------------------------------------- gateway
 

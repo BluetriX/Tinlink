@@ -48,6 +48,7 @@
       <header class="bar">
         <strong id="group-name">No group</strong>
         <button id="group-invite" type="button" class="small" hidden title="Create an invite code">Invite</button>
+        <button id="group-settings" type="button" class="small" hidden title="Group settings">⚙</button>
       </header>
       <div id="channel-tree"></div>
 
@@ -108,6 +109,15 @@
         <button id="logout" type="button" class="small">Log out</button>
       </footer>
     </aside>
+
+    <section id="settings-view" hidden>
+      <header class="bar">
+        <strong id="settings-title">Group settings</strong>
+        <nav id="settings-tabs" class="tabs"></nav>
+        <button id="settings-close" type="button" class="small">Close</button>
+      </header>
+      <div id="settings-body"></div>
+    </section>
 
     <section id="chat">
       <header class="bar">

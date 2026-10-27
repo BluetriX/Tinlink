@@ -252,7 +252,11 @@ or another channel is open (shown as "Windows PowerShell", because the
 portable exe has no registered app id), change your password, see who is online (member list, online first) and
 who is typing, write direct messages to group members ("Message" next to a
 member; "@" at the top of the group rail lists conversations with unread
-counts, a new message notifies like a mention), search all messages you can
+counts, a new message notifies like a mention), manage the group with "⚙" next to its name (shown to members with admin
+permissions): name, room limit, invites and deletion; roles with their
+permissions and order; role assignment and kicking members; creating,
+renaming and deleting channels and categories and allowing or denying
+permissions per channel for roles or members. Also search all messages you can
 see (field in the chat header; a hit opens its channel or conversation and
 scrolls to the message), see
 who is in which voice channel, join a channel's voice, and create your own
