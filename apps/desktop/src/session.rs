@@ -17,7 +17,8 @@ use tokio::task::JoinHandle;
 use crate::AppState;
 use crate::audio::AudioPrefs;
 use crate::camera::{CameraSettings, CameraShare};
-use crate::cameras::CameraGrid;
+use crate::cameras::{CameraGrid, SpeakingCheck};
+use crate::listen::{ListenPrefs, RemoteAudio, Speakers};
 use crate::mic::{MicHooks, MicMonitor};
 use crate::screen::{ScreenShare, ShareInfo, ShareSettings};
 use crate::stats::{self, LinkStats};
@@ -25,11 +26,11 @@ use crate::viewer::Viewer;
 use crate::voice::Voice;
 
 /// How often the participant list is pushed to the UI.
-const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(200);
+const SNAPSHOT_INTERVAL: Duration = Duration::from_millis(100);
 /// Longest wait for the microphone to be published while joining.
 const PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Stats are collected on every n-th snapshot.
-const STATS_EVERY: u32 = 5;
+const STATS_EVERY: u32 = 10;
 
 pub struct Session {
     app: AppHandle,
@@ -49,26 +50,31 @@ pub struct Session {
     _audio: PlatformAudio,
     /// Beeps when the user talks while nothing is transmitted.
     mic_monitor: MicMonitor,
+    /// Remote microphones: speaking levels, volume and compressor.
+    remote_audio: Arc<RemoteAudio>,
+    speakers: Arc<Speakers>,
 }
 
 type Viewers = Arc<std::sync::Mutex<HashMap<TrackSid, Viewer>>>;
 
-/// Mutes or unmutes `identity`'s audio for this client only: a disabled
-/// remote track is played out at volume zero.
-fn apply_local_mute(room: &Room, identity: &str, muted: bool) {
-    for participant in room.remote_participants().into_values() {
-        if participant.identity().as_str() != identity {
-            continue;
-        }
-        for publication in participant.track_publications().into_values() {
-            if let Some(RemoteTrack::Audio(track)) = publication.track() {
-                track.rtc_track().set_enabled(!muted);
-            }
-        }
-    }
+/// Whether a participant is audible right now; the own microphone counts
+/// only while it transmits.
+fn speaking_check(app: &AppHandle, room: &Arc<Room>, speakers: &Arc<Speakers>) -> SpeakingCheck {
+    let (app, room, speakers) = (app.clone(), room.clone(), speakers.clone());
+    let local = room.local_participant().identity().to_string();
+    Arc::new(move |identity: &str| {
+        speakers.speaking(identity)
+            && (identity != local
+                || (mic_published(&room) && app.state::<AppState>().voice.transmitting()))
+    })
 }
 
-fn start_mic_monitor(app: &AppHandle, room: &Arc<Room>, device: Option<String>) -> MicMonitor {
+fn start_mic_monitor(
+    app: &AppHandle,
+    room: &Arc<Room>,
+    speakers: &Arc<Speakers>,
+    device: Option<String>,
+) -> MicMonitor {
     let hooks = MicHooks {
         transmitting: {
             let (app, room) = (app.clone(), room.clone());
@@ -89,8 +95,10 @@ fn start_mic_monitor(app: &AppHandle, room: &Arc<Room>, device: Option<String>) 
             })
         },
         on_level: {
-            let app = app.clone();
+            let (app, speakers) = (app.clone(), speakers.clone());
+            let identity = room.local_participant().identity().to_string();
             Box::new(move |db| {
+                speakers.record(&identity, db);
                 let _ = app.emit("mic-level", db);
             })
         },
@@ -218,12 +226,18 @@ impl Session {
         }
         voice.resync();
 
-        let mic_monitor = start_mic_monitor(&app, &room, audio_prefs.input_name(&audio));
+        let speakers = Arc::new(Speakers::default());
+        let mic_monitor = start_mic_monitor(&app, &room, &speakers, audio_prefs.input_name(&audio));
+        let remote_audio = Arc::new(RemoteAudio::new(
+            speakers.clone(),
+            audio_prefs.output_name(&audio),
+        ));
+        let speaking = speaking_check(&app, &room, &speakers);
 
         let mic_id = mic.rtc_track().id();
         let link_stats = Arc::new(Mutex::new(HashMap::new()));
         let viewers = Viewers::default();
-        let cameras = Arc::new(CameraGrid::new(app.clone(), room.clone()));
+        let cameras = Arc::new(CameraGrid::new(app.clone(), speaking.clone()));
         let tasks = vec![
             tokio::spawn(event_loop(
                 app.clone(),
@@ -231,9 +245,16 @@ impl Session {
                 mic.clone(),
                 viewers.clone(),
                 cameras.clone(),
+                remote_audio.clone(),
                 events,
             )),
-            tokio::spawn(snapshot_loop(app.clone(), room.clone(), mic, link_stats)),
+            tokio::spawn(snapshot_loop(
+                app.clone(),
+                room.clone(),
+                mic,
+                link_stats,
+                speaking,
+            )),
         ];
 
         Ok(Self {
@@ -249,6 +270,8 @@ impl Session {
             tasks,
             _audio: audio,
             mic_monitor,
+            remote_audio,
+            speakers,
         })
     }
 
@@ -263,11 +286,20 @@ impl Session {
     /// Points the microphone monitor (voice activation, hint, meter) at `device`.
     pub fn restart_mic_monitor(&mut self, device: Option<String>) {
         // The old monitor stops when replaced.
-        self.mic_monitor = start_mic_monitor(&self.app, &self.room, device);
+        self.mic_monitor = start_mic_monitor(&self.app, &self.room, &self.speakers, device);
     }
 
     pub fn set_local_mute(&self, identity: &str, muted: bool) {
-        apply_local_mute(&self.room, identity, muted);
+        self.remote_audio.set_muted(identity, muted);
+    }
+
+    pub fn set_listen_prefs(&self, identity: &str, prefs: ListenPrefs) {
+        self.remote_audio.set_prefs(identity, prefs);
+    }
+
+    /// Follows a speaker change for participants played by this client itself.
+    pub fn set_output_device(&self, name: Option<String>) {
+        self.remote_audio.set_output_device(name);
     }
 
     /// Opens (or brings to front) the viewer for `identity`'s screen share.
@@ -399,6 +431,7 @@ async fn event_loop(
     mic: LocalAudioTrack,
     viewers: Viewers,
     cameras: Arc<CameraGrid>,
+    remote_audio: Arc<RemoteAudio>,
     mut events: mpsc::UnboundedReceiver<RoomEvent>,
 ) {
     // Dropping the viewers (on leave) closes their windows.
@@ -410,15 +443,17 @@ async fn event_loop(
                 participant,
                 ..
             } => {
-                let muted = app
-                    .state::<AppState>()
-                    .locally_muted
+                let identity = participant.identity().to_string();
+                let state = app.state::<AppState>();
+                let muted = state.locally_muted.lock().unwrap().contains(&identity);
+                let prefs = state
+                    .listen_prefs
                     .lock()
                     .unwrap()
-                    .contains(participant.identity().as_str());
-                if muted {
-                    track.rtc_track().set_enabled(false);
-                }
+                    .get(&identity)
+                    .copied()
+                    .unwrap_or_default();
+                remote_audio.add(&identity, track.rtc_track(), prefs, muted);
             }
             RoomEvent::TrackSubscribed {
                 track: RemoteTrack::Video(track),
@@ -446,7 +481,14 @@ async fn event_loop(
                     false,
                 );
             }
-            RoomEvent::TrackUnsubscribed { publication, .. } => {
+            RoomEvent::TrackUnsubscribed {
+                publication,
+                participant,
+                ..
+            } => {
+                if publication.source() == TrackSource::Microphone {
+                    remote_audio.remove(participant.identity().as_str());
+                }
                 viewers.lock().unwrap().remove(&publication.sid());
                 cameras.remove(&publication.sid());
             }
@@ -536,6 +578,7 @@ async fn snapshot_loop(
     room: Arc<Room>,
     mic: LocalAudioTrack,
     link_stats: Arc<Mutex<HashMap<String, LinkStats>>>,
+    speaking: SpeakingCheck,
 ) {
     let mut tick = tokio::time::interval(SNAPSHOT_INTERVAL);
     let mut n = 0u32;
@@ -552,7 +595,7 @@ async fn snapshot_loop(
         let local_identity = local.identity().to_string();
         let mut participants = vec![ParticipantView {
             name: local.name(),
-            speaking: local.is_speaking(),
+            speaking: speaking(local.identity().as_str()),
             // Without a publication a moderator muted us on the server.
             transmitting: mic_published(&room) && app.state::<AppState>().voice.transmitting(),
             mic_muted: mic.is_muted() || !mic_published(&room),
@@ -582,7 +625,7 @@ async fn snapshot_loop(
             let identity = p.identity().to_string();
             participants.push(ParticipantView {
                 name: p.name(),
-                speaking: p.is_speaking(),
+                speaking: speaking(p.identity().as_str()),
                 transmitting: false,
                 mic_muted: pubs
                     .values()

@@ -88,18 +88,21 @@ struct Open {
 }
 
 /// The camera grid of one room; dropping it closes the window.
+/// Whether a participant (by identity) is speaking right now.
+pub type SpeakingCheck = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+
 pub struct CameraGrid {
     app: AppHandle,
-    room: Arc<Room>,
+    speaking: SpeakingCheck,
     shared: Arc<Shared>,
     open: Mutex<Option<Open>>,
 }
 
 impl CameraGrid {
-    pub fn new(app: AppHandle, room: Arc<Room>) -> Self {
+    pub fn new(app: AppHandle, speaking: SpeakingCheck) -> Self {
         Self {
             app,
-            room,
+            speaking,
             shared: Arc::default(),
             open: Mutex::new(None),
         }
@@ -188,16 +191,16 @@ impl CameraGrid {
             .context("cannot create camera window")?;
         let stop = Arc::new(AtomicBool::new(false));
         {
-            let (window, stop, shared, room) = (
+            let (window, stop, shared, speaking) = (
                 window.clone(),
                 stop.clone(),
                 self.shared.clone(),
-                self.room.clone(),
+                self.speaking.clone(),
             );
             std::thread::Builder::new()
                 .name("camera-grid".into())
                 .spawn(move || {
-                    if let Err(e) = render_loop(&window, &shared, &room, &stop) {
+                    if let Err(e) = render_loop(&window, &shared, &*speaking, &stop) {
                         tracing::debug!("camera grid stopped: {e:#}");
                     }
                     // Closed by the user: stop converting frames for it.
@@ -310,18 +313,12 @@ async fn feed(shared: Arc<Shared>, sid: TrackSid, track: RtcVideoTrack, mirror: 
     }
 }
 
-fn is_speaking(room: &Room, identity: &str) -> bool {
-    let local = room.local_participant();
-    if local.identity().as_str() == identity {
-        return local.is_speaking();
-    }
-    room.remote_participants()
-        .into_values()
-        .find(|p| p.identity().as_str() == identity)
-        .is_some_and(|p| p.is_speaking())
-}
-
-fn render_loop(window: &Window, shared: &Shared, room: &Room, stop: &AtomicBool) -> Result<()> {
+fn render_loop(
+    window: &Window,
+    shared: &Shared,
+    is_speaking: &(dyn Fn(&str) -> bool + Send + Sync),
+    stop: &AtomicBool,
+) -> Result<()> {
     let context = softbuffer::Context::new(window.clone()).map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut surface =
         softbuffer::Surface::new(&context, window.clone()).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -336,10 +333,7 @@ fn render_loop(window: &Window, shared: &Shared, room: &Room, stop: &AtomicBool)
         };
         let speaking: Vec<bool> = {
             let tiles = shared.tiles.lock().unwrap();
-            tiles
-                .iter()
-                .map(|t| is_speaking(room, &t.identity))
-                .collect()
+            tiles.iter().map(|t| is_speaking(&t.identity)).collect()
         };
 
         surface

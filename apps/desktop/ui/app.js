@@ -2146,8 +2146,58 @@ function participantRow(p) {
   row.li = el("li", {},
     el("div", { class: "who" }, row.dot, row.name, row.muted, row.screen, row.camera,
       p.isLocal ? null : el("span", { class: "actions" }, row.watch, row.mute)),
+    p.isLocal ? null : listenControls(p.identity),
     row.stats);
   return row;
+}
+
+function listenPrefs(identity) {
+  const saved = settings.load();
+  return { volume: saved.volumes?.[identity] ?? 1, compressor: saved.compressors?.[identity] || "off" };
+}
+
+async function saveListenPrefs(identity, prefs) {
+  const saved = settings.load();
+  settings.save({
+    volumes: { ...saved.volumes, [identity]: prefs.volume },
+    compressors: { ...saved.compressors, [identity]: prefs.compressor },
+  });
+  await run(() => invoke("set_listen_prefs", { identity, prefs }));
+}
+
+/**
+ * The second line of a remote participant: volume (up to 200 %) and
+ * compressor, for you only. Changing either plays this person through the
+ * app's own output instead of WebRTC's.
+ */
+function listenControls(identity) {
+  const prefs = listenPrefs(identity);
+  const pct = el("span", { class: "pct" });
+  const showPct = (v) => { pct.textContent = `${Math.round(v * 100)} %`; };
+  showPct(prefs.volume);
+  const volume = el("input", {
+    type: "range", class: "volume", min: "0", max: "2", step: "0.05", value: String(prefs.volume),
+    title: "Volume (for you only), up to 200 %. Double-click: 100 %",
+  });
+  const compressor = el("select", {
+    class: "compressor", title: "Compressor: evens out loud and quiet speech (for you only)",
+  },
+  el("option", { value: "off", textContent: "off" }),
+  el("option", { value: "light", textContent: "light" }),
+  el("option", { value: "strong", textContent: "strong" }));
+  compressor.value = prefs.compressor;
+  const apply = () => {
+    showPct(Number(volume.value));
+    saveListenPrefs(identity, { volume: Number(volume.value), compressor: compressor.value });
+  };
+  volume.addEventListener("input", apply);
+  volume.addEventListener("dblclick", () => {
+    volume.value = "1";
+    apply();
+  });
+  compressor.addEventListener("change", apply);
+  return el("div", { class: "listen" },
+    volume, pct, el("label", { title: compressor.title }, "Comp.", compressor));
 }
 
 async function toggleLocalMute(identity) {
@@ -2377,6 +2427,9 @@ async function init() {
   await invoke("set_va_threshold", { db: threshold });
   for (const identity of saved.localMutes || []) {
     await run(() => invoke("set_local_mute", { identity, muted: true }));
+  }
+  for (const identity of new Set([...Object.keys(saved.volumes || {}), ...Object.keys(saved.compressors || {})])) {
+    await run(() => invoke("set_listen_prefs", { identity, prefs: listenPrefs(identity) }));
   }
   await loadAudioDevices(saved);
 

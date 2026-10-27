@@ -71,6 +71,12 @@ impl AudioPrefs {
             .find(|d| d.id.as_str() == id)
             .map(|d| d.name)
     }
+
+    /// Name of the selected speaker, `None` for the system default.
+    pub fn output_name(&self, audio: &PlatformAudio) -> Option<String> {
+        let id = self.output.lock().unwrap().clone()?;
+        device_name(audio, DeviceKind::Output, &id)
+    }
 }
 
 pub fn list(audio: &PlatformAudio) -> AudioDevices {

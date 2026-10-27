@@ -7,6 +7,8 @@ mod backend;
 mod border;
 mod camera;
 mod cameras;
+mod dsp;
+mod listen;
 mod mic;
 mod ptt;
 mod screen;
@@ -36,6 +38,8 @@ struct AppState {
     platform_audio: std::sync::Mutex<Option<livekit::PlatformAudio>>,
     /// Participants (by identity) this client does not want to hear.
     locally_muted: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// Volume and compressor per participant (by identity), for this client.
+    listen_prefs: std::sync::Mutex<std::collections::HashMap<String, listen::ListenPrefs>>,
 }
 
 /// Errors cross the IPC boundary as plain strings.
@@ -203,10 +207,11 @@ async fn set_audio_device(
         .map_err(|e| format!("{e:#}"))?
     };
     // No audio module calls while the session lock is held.
-    if kind == DeviceKind::Input
-        && let Some(session) = state.session.lock().await.as_mut()
-    {
-        session.restart_mic_monitor(name);
+    if let Some(session) = state.session.lock().await.as_mut() {
+        match kind {
+            DeviceKind::Input => session.restart_mic_monitor(name),
+            DeviceKind::Output => session.set_output_device(name),
+        }
     }
     Ok(())
 }
@@ -261,6 +266,24 @@ async fn set_local_mute(
     }
     if let Some(session) = state.session.lock().await.as_ref() {
         session.set_local_mute(&identity, muted);
+    }
+    Ok(())
+}
+
+/// Sets a participant's volume and compressor for this client only.
+#[tauri::command]
+async fn set_listen_prefs(
+    state: State<'_, AppState>,
+    identity: String,
+    prefs: listen::ListenPrefs,
+) -> CmdResult<()> {
+    state
+        .listen_prefs
+        .lock()
+        .unwrap()
+        .insert(identity.clone(), prefs);
+    if let Some(session) = state.session.lock().await.as_ref() {
+        session.set_listen_prefs(&identity, prefs);
     }
     Ok(())
 }
@@ -436,6 +459,7 @@ fn main() {
             audio_prefs: AudioPrefs::default(),
             ptt_key: ptt::PttKey::default(),
             locally_muted: Default::default(),
+            listen_prefs: Default::default(),
             platform_audio: Default::default(),
         })
         .setup(|app| {
@@ -472,6 +496,7 @@ fn main() {
             set_ptt_key,
             record_ptt_key,
             set_local_mute,
+            set_listen_prefs,
             notify,
             restart_app,
             watch_screen,

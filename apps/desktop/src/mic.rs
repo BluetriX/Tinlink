@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
+use crate::dsp::rms_db;
+
 /// Continuous talking (short pauses allowed) needed before the beep.
 const TALK_DURATION: Duration = Duration::from_secs(5);
 /// Pauses up to this long still count as one stretch of talking.
@@ -108,14 +110,6 @@ impl Detector {
         }
         false
     }
-}
-
-fn rms_db(samples: impl Iterator<Item = f32>) -> f32 {
-    let (sum, n) = samples.fold((0.0f64, 0usize), |(s, n), x| (s + f64::from(x * x), n + 1));
-    if n == 0 || sum <= 0.0 {
-        return -120.0;
-    }
-    (10.0 * (sum / n as f64).log10()) as f32
 }
 
 /// What the monitor reports to and asks from the rest of the app.
@@ -347,13 +341,5 @@ mod tests {
         assert!(!g.update(at(520), -70.0, -45.0));
         // Exactly at the threshold counts as speech.
         assert!(g.update(at(600), -45.0, -45.0));
-    }
-
-    #[test]
-    fn rms_of_full_scale_sine_is_about_minus_3_db() {
-        let sine = (0..480).map(|i| (i as f32 / 480.0 * std::f32::consts::TAU * 10.0).sin());
-        let db = rms_db(sine);
-        assert!((-3.1..-2.9).contains(&db), "{db}");
-        assert_eq!(rms_db(std::iter::empty()), -120.0);
     }
 }
