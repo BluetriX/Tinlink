@@ -5,6 +5,7 @@ import {
   shareSize, sortMembers, typingText,
 } from "./logic.js";
 import { createSettings, hasSettings } from "./admin.js";
+import { avatar, chooseAndUpload, imageUrl, initials } from "./images.js";
 
 const LK = window.LivekitClient;
 
@@ -263,7 +264,54 @@ $("logout").addEventListener("click", async () => {
   showLogin();
 });
 
+function renderMe() {
+  const user = state.session.user;
+  $("me").replaceChildren(avatar(user), el("span", { class: "ellipsis", textContent: `${user.display_name || user.name} @ ${location.host}` }));
+}
+
 $("me").addEventListener("click", async () => {
+  const user = state.session.user;
+  const preview = el("span", {}, avatar(user, "large"));
+  const removeButton = el("button", { type: "button", class: "small", textContent: "Remove", hidden: !user.avatar_id });
+  const setAvatar = async (image) => {
+    const updated = await api("PUT", "/users/me/avatar", { image });
+    onUserUpdated(updated);
+    preview.replaceChildren(avatar(updated, "large"));
+    removeButton.hidden = !updated.avatar_id;
+  };
+  removeButton.onclick = () => run(() => setAvatar(null));
+  let wantsPassword = false;
+  const values = await ask({
+    title: "Your profile",
+    text: el("div", {},
+      el("div", { class: "row profile-avatar" },
+        preview,
+        el("button", {
+          type: "button", class: "small", textContent: "Choose picture…",
+          onclick: () => run(() => chooseAndUpload(setAvatar)),
+        }),
+        removeButton),
+      el("p", { class: "hint", textContent: `User name: @${user.name} (cannot be changed)` }),
+      el("button", {
+        type: "button", class: "link", textContent: "Change password…",
+        onclick: () => {
+          wantsPassword = true;
+          $("dialog-cancel").click();
+        },
+      })),
+    fields: [{ id: "display_name", label: "Display name", value: user.display_name }],
+    ok: "Save",
+    submit: (v) => {
+      if (!v.display_name) return "Enter a display name.";
+      if (v.display_name === state.session.user.display_name) return null;
+      return tryText(async () => onUserUpdated(await api("PATCH", "/users/me", { display_name: v.display_name })));
+    },
+  });
+  if (values) setStatus("Profile saved");
+  if (wantsPassword) changePassword();
+});
+
+async function changePassword() {
   await ask({
     title: "Change password",
     fields: [
@@ -278,7 +326,7 @@ $("me").addEventListener("click", async () => {
       }));
     },
   }) && setStatus("Password changed; other sessions were signed out.");
-});
+}
 
 // ------------------------------------------------------------------ main
 
@@ -286,7 +334,7 @@ async function showMain() {
   $("login-view").hidden = true;
   $("main-view").hidden = false;
   const user = state.session.user;
-  $("me").textContent = `${user.display_name || user.name} @ ${location.host}`;
+  renderMe();
   state.view = "group";
   state.dms = [];
   $("member-panel").hidden = false;
@@ -330,16 +378,11 @@ function renderGroups() {
         type: "button",
         class: current ? "active" : "",
         title: g.name,
-        textContent: initials(g.name),
         onclick: () => selectGroup(g.id),
-      }),
+      }, g.icon_id ? el("img", { src: imageUrl(g.icon_id), alt: "" }) : initials(g.name)),
       !current && g.mention_count ? el("span", { class: "badge-count", textContent: String(g.mention_count) }) : null);
   }));
   updateTitle();
-}
-
-function initials(name) {
-  return name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("") || "?";
 }
 
 function updateTitle() {
@@ -424,6 +467,7 @@ function renderMembers() {
       onclick: other ? () => openDm(m.user_id) : null,
     },
     el("span", { class: `dot${m.online ? " online" : ""}` }),
+    avatar(m, "medium"),
     el("span", { class: "ellipsis", textContent: m.display_name || m.name }));
   }));
 }
@@ -529,9 +573,8 @@ function channelNodes(ch) {
   const row = el("div", { class: `channel${active ? " active" : ""}${unread ? " unread" : ""}` },
     el("button", {
       type: "button", class: "name", title: ch.name,
-      textContent: `# ${ch.name}${ch.temporary ? " ⏱" : ""}`,
       onclick: () => openChannel(ch),
-    }),
+    }, channelIcon(ch), el("span", { class: "ellipsis", textContent: `${ch.name}${ch.temporary ? " ⏱" : ""}` })),
     !active && ch.mention_count ? el("span", { class: "mentions", textContent: String(ch.mention_count) }) : null,
     canJoin ? el("button", {
       type: "button", class: "join", title: "Join voice", textContent: "🔊",
@@ -548,9 +591,16 @@ function channelNodes(ch) {
       onclick: moderate ? () => moderateVoice(ch, v.user_id) : null,
     },
     el("span", { class: "dot" }),
+    avatar(m),
     el("span", { textContent: memberName(v.user_id) }));
   })) : null;
   return [row, list].filter(Boolean);
+}
+
+/** The channel's icon image, emoji or a plain `#`. */
+function channelIcon(ch) {
+  if (ch.icon_id) return el("img", { class: "channel-icon", src: imageUrl(ch.icon_id), alt: "" });
+  return el("span", { class: "channel-icon", textContent: ch.emoji || "#" });
 }
 
 function canModerate() {
@@ -691,13 +741,23 @@ function renderMessage(m) {
   const actions = (mine || canDelete) ? el("span", { class: "actions" },
     mine ? el("button", { type: "button", textContent: "Edit", onclick: () => editMessage(m) }) : null,
     canDelete ? el("button", { type: "button", textContent: "Delete", onclick: () => deleteMessage(m) }) : null) : null;
+  const author = userInfo(m.author_id) || { name: m.author_name || "?" };
   return el("div", { class: `message${mentionsMe(m) ? " mention" : ""}`, dataset: { id: m.id } },
-    el("div", { class: "meta" },
-      el("strong", { textContent: m.author_name || "deleted user" }),
-      el("span", { textContent: formatTime(m.created_at) + (m.edited_at ? " (edited)" : "") }),
-      actions),
-    m.content ? el("div", { class: "text", textContent: m.content }) : null,
-    ...(m.attachments || []).map(renderAttachment));
+    avatar(author, "medium"),
+    el("div", { class: "body" },
+      el("div", { class: "meta" },
+        el("strong", { textContent: author.display_name || m.author_name || "deleted user" }),
+        el("span", { textContent: formatTime(m.created_at) + (m.edited_at ? " (edited)" : "") }),
+        actions),
+      m.content ? el("div", { class: "text", textContent: m.content }) : null,
+      ...(m.attachments || []).map(renderAttachment)));
+}
+
+/** What we know about a user: name, display name and avatar. */
+function userInfo(id) {
+  if (!id) return null;
+  if (id === state.session?.user.id) return state.session.user;
+  return state.members.get(id) || state.dms.find((d) => d.user.id === id)?.user || null;
 }
 
 async function editMessage(m) {
@@ -1137,6 +1197,7 @@ function renderDmList() {
         onclick: () => openChannel(dmChannel(dm)),
       },
       el("span", { class: `dot${dm.user.online ? " online" : ""}` }),
+      avatar(dm.user, "medium"),
       el("span", { class: "ellipsis", textContent: dm.user.display_name || dm.user.name })),
       unread ? el("span", { class: "mentions", textContent: String(dm.unread_count) }) : null);
   }));
@@ -1188,6 +1249,34 @@ function onPresence(userId, online, inGroup) {
   if (dm && dm.user.online !== online) {
     dm.user.online = online;
     if (state.view === "dms") renderDmList();
+  }
+}
+
+/** Another user (or we, in another session) changed name or avatar. */
+function onUserUpdated(user) {
+  const profile = { display_name: user.display_name, avatar_id: user.avatar_id };
+  if (user.id === state.session?.user.id) {
+    Object.assign(state.session.user, profile);
+    store.set("tinlink.session", state.session);
+    renderMe();
+  }
+  const member = state.members.get(user.id);
+  if (member) {
+    Object.assign(member, profile);
+    renderMembers();
+    renderTree();
+  }
+  const dm = state.dms.find((d) => d.user.id === user.id);
+  if (dm) {
+    Object.assign(dm.user, profile);
+    if (state.view === "dms") renderDmList();
+  }
+  // Author names and avatars in the open chat.
+  for (const m of state.messages) {
+    if (m.author_id === user.id) {
+      m.author_name = user.display_name;
+      replaceMessage(m);
+    }
   }
 }
 
@@ -1313,6 +1402,9 @@ function onGatewayEvent(e) {
       break;
     case "presence_changed":
       onPresence(e.user_id, e.data.online, inGroup);
+      break;
+    case "user_updated":
+      onUserUpdated(e.data);
       break;
     case "typing":
       if (e.user_id !== state.session?.user.id) {

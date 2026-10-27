@@ -5,6 +5,7 @@ import {
   CHANNEL_PERMISSIONS, PERMISSIONS, can, canEditRole, formatPerms, memberPosition, overwriteState, parsePerms,
   roleColor, setOverwriteState,
 } from "./logic.js";
+import { chooseAndUpload, imageUrl, initials } from "./images.js";
 
 const TABS = [
   ["overview", "Overview", (p) => can(p, "MANAGE_GROUP")],
@@ -138,6 +139,7 @@ export function createSettings(ctx) {
     const name = el("input", { value: g.name, maxLength: 64 });
     const limit = el("input", { type: "number", min: 0, max: 50, value: String(g.user_channel_limit) });
     const parts = [section("Group",
+      field("Icon", iconPicker(g.icon_id, initials(g.name), `/groups/${g.id}/icon`, "Group icon")),
       field("Name", name),
       field("Own channels per member", limit),
       el("p", { class: "hint", textContent: "How many channels a member may create in categories that allow it." }),
@@ -169,6 +171,19 @@ export function createSettings(ctx) {
         })));
     }
     return parts;
+  }
+
+  /** Preview plus "Choose…" and "Remove" buttons for an icon at `path`. */
+  function iconPicker(iconId, fallback, path, label) {
+    const set = (image) => call(() => api("PUT", path, { image }), image ? `${label} saved` : `${label} removed`);
+    return el("span", { class: "row icon-picker" },
+      iconId ? el("img", { class: "icon-preview", src: imageUrl(iconId), alt: "" })
+        : el("span", { class: "icon-preview", textContent: fallback }),
+      el("button", {
+        type: "button", class: "small", textContent: "Choose…",
+        onclick: () => call(() => chooseAndUpload(set)),
+      }),
+      iconId ? el("button", { type: "button", class: "small", textContent: "Remove", onclick: () => set(null) }) : null);
   }
 
   // --------------------------------------------------------------- roles
@@ -333,19 +348,24 @@ export function createSettings(ctx) {
       const name = el("input", { value: ch.name, maxLength: 64 });
       const position = el("input", { type: "number", value: String(ch.position), class: "narrow" });
       const voiceBox = el("input", { type: "checkbox", checked: ch.voice_enabled });
+      const emoji = el("input", {
+        value: ch.emoji || "", maxLength: 8, class: "emoji", placeholder: "#",
+        title: "Emoji shown before the name (used when there is no icon image)",
+      });
       const category = el("select", {},
         el("option", { value: "", textContent: "(no category)" }),
         ...cats.map((c) => el("option", { value: c.id, textContent: c.name })));
       category.value = ch.category_id || "";
       return el("div", { class: "row item", dataset: { channel: ch.name } },
-        name, position,
+        iconPicker(ch.icon_id, ch.emoji || "#", `/channels/${ch.id}/icon`, "Channel icon"),
+        emoji, name, position,
         el("label", { class: "inline" }, voiceBox, " voice"),
         category,
         el("button", {
           type: "button", class: "small", textContent: "Save",
           onclick: () => call(() => api("PATCH", `/channels/${ch.id}`, {
             name: name.value.trim(), position: Number(position.value), voice_enabled: voiceBox.checked,
-            category_id: category.value || null,
+            category_id: category.value || null, emoji: emoji.value.trim() || null,
           }), "Channel saved"),
         }),
         el("button", {
