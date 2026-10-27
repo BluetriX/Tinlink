@@ -448,6 +448,44 @@ button.danger {
   text-align: left;
 }
 
+.role-color {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  vertical-align: middle;
+}
+
+label.narrow {
+  flex: 0 0 90px;
+}
+
+input.pos {
+  width: 70px;
+}
+
+.new-row {
+  margin-top: 8px;
+}
+
+.overwrite-entries {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.overwrite-entries button.active,
+.channel-row button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.invite-code {
+  font-size: 14px;
+  padding: 2px 6px;
+}
+
 .role-item.active {
   border-color: var(--accent);
   color: var(--accent);
@@ -494,7 +532,7 @@ button.danger {
 }
 
 .overwrite-editor {
-  margin: 6px 0 12px 118px;
+  margin: 6px 0 12px 0;
   padding: 8px;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -960,4 +998,10 @@ dialog h2 {
   padding: 6px;
   background: var(--panel-2);
   border-radius: 4px;
+}
+
+.perm:has(input:disabled),
+.chip:has(input:disabled),
+.overwrite-row:has(input:disabled) {
+  opacity: 0.45;
 }

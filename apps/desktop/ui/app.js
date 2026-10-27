@@ -453,6 +453,7 @@ function refreshGroup() {
     state.group = group;
     if (state.view === "group") $("group-name").textContent = group.name;
     updateSettingsButton();
+    if (settingsOpen()) renderSettings();
     setMembers(members || []);
     setChannels(channels);
     if (state.channel && !state.channel.dm && !state.channels.some((c) => c.id === state.channel.id)) {
@@ -1152,8 +1153,9 @@ $("composer").addEventListener("submit", async (ev) => {
 });
 
 // --------------------------------------------------------- group settings
-// Admin UI for roles, members, channels and group settings. The server
-// checks every change (role hierarchy, grants); errors show in the status line.
+// Admin UI for the group, roles, members, channels and invites. It mirrors
+// the server's rules (role hierarchy, granting only what you have); the
+// server enforces them anyway and its error text shows in the status line.
 
 const PERMISSIONS = [
   ["VIEW_CHANNEL", "View channels"],
@@ -1168,21 +1170,17 @@ const PERMISSIONS = [
   ["MUTE_MEMBERS", "Mute members in voice"],
   ["MOVE_MEMBERS", "Move and disconnect in voice"],
   ["KICK_MEMBERS", "Kick members"],
-  ["BAN_MEMBERS", "Ban members"],
   ["MANAGE_ROLES", "Manage roles"],
   ["MANAGE_GROUP", "Manage group and invites"],
   ["ADMINISTRATOR", "Administrator (all permissions)"],
 ];
-/** Permissions that make sense per channel (overwrites). */
-const CHANNEL_PERMISSIONS = PERMISSIONS.filter(([flag]) => [
-  "VIEW_CHANNEL", "SEND_MESSAGES", "ATTACH_FILES", "CONNECT", "SPEAK", "SHARE_SCREEN",
-  "MANAGE_MESSAGES", "MUTE_MEMBERS", "MOVE_MEMBERS",
-].includes(flag));
+/** Permissions that can be allowed or denied per channel. */
+const CHANNEL_PERMISSIONS = PERMISSIONS.slice(0, 11).filter(([flag]) => flag !== "CREATE_OWN_CHANNELS");
 
 const flagSet = (perms) => new Set((perms || "").split("|").map((p) => p.trim()).filter(Boolean));
 const joinFlags = (set) => [...set].join(" | ");
 
-const admin = { tab: "general", roles: [], roleId: null, overwriteChannel: null };
+const admin = { tab: "overview", roles: [], roleId: null, overwriteChannel: null, overwriteTarget: null };
 
 function canAdmin(flag) {
   return can(state.group?.permissions, flag);
@@ -1192,18 +1190,33 @@ function isOwner() {
   return state.group?.owner_id === myId();
 }
 
-/** Shows the gear button when the user may change anything in the group. */
+/** Whether I may hand out `flag` (in a role or a channel overwrite). */
+function canGrant(flag, perms = state.group?.permissions) {
+  return isOwner() || can(perms, flag);
+}
+
+/** Roles strictly below my highest role can be managed and assigned. */
+const myPosition = () => state.group?.my_position ?? 0;
+const belowMe = (role) => role.position < myPosition();
+
+const colorToHex = (c) => `#${((c ?? 0x99aab5) >>> 0).toString(16).padStart(6, "0").slice(-6)}`;
+const hexToColor = (hex) => parseInt(hex.slice(1), 16);
+
+/** Shows the settings button when the user may change anything in the group. */
 function updateSettingsButton() {
   const any = ["MANAGE_GROUP", "MANAGE_ROLES", "MANAGE_CHANNELS", "KICK_MEMBERS"].some(canAdmin);
-  $("group-settings").hidden = state.view !== "group" || !any;
+  $("group-settings").hidden = state.view !== "group" || !state.group || !any;
   if ($("group-settings").hidden) closeSettings();
+}
+
+function settingsOpen() {
+  return !$("settings-view").hidden;
 }
 
 function openSettings(tab) {
   admin.tab = tab || admin.tab;
   $("chat").hidden = true;
   $("settings-view").hidden = false;
-  $("settings-title").textContent = `${state.group.name} – settings`;
   renderSettings();
 }
 
@@ -1213,25 +1226,34 @@ function closeSettings() {
 }
 
 async function renderSettings() {
+  if (!state.group) return closeSettings();
+  $("settings-title").textContent = `${state.group.name} – settings`;
   const tabs = [
-    ["general", "General", canAdmin("MANAGE_GROUP") || isOwner()],
+    ["overview", "Overview", canAdmin("MANAGE_GROUP") || isOwner()],
     ["roles", "Roles", canAdmin("MANAGE_ROLES")],
     ["members", "Members", canAdmin("MANAGE_ROLES") || canAdmin("KICK_MEMBERS")],
     ["channels", "Channels", canAdmin("MANAGE_CHANNELS")],
+    ["invites", "Invites", canAdmin("MANAGE_GROUP")],
   ].filter(([, , allowed]) => allowed);
-  if (!tabs.some(([id]) => id === admin.tab)) admin.tab = tabs[0]?.[0];
+  if (!tabs.length) return closeSettings();
+  if (!tabs.some(([id]) => id === admin.tab)) admin.tab = tabs[0][0];
   $("settings-tabs").replaceChildren(...tabs.map(([id, label]) => el("button", {
     type: "button", class: `small${id === admin.tab ? " active" : ""}`, textContent: label,
     onclick: () => { admin.tab = id; renderSettings(); },
   })));
-  const body = $("settings-body");
-  if (admin.tab === "general") body.replaceChildren(...settingsGeneral());
-  else if (admin.tab === "roles") body.replaceChildren(...(await settingsRoles()));
-  else if (admin.tab === "members") body.replaceChildren(...(await settingsMembers()));
-  else if (admin.tab === "channels") body.replaceChildren(...settingsChannels());
+  const builders = {
+    overview: async () => settingsOverview(),
+    roles: settingsRoles,
+    members: settingsMembers,
+    channels: async () => settingsChannels(),
+    invites: settingsInvites,
+  };
+  const tab = admin.tab;
+  const nodes = await builders[tab]();
+  if (admin.tab === tab) $("settings-body").replaceChildren(...nodes);
 }
 
-/** Reloads group data after a change, then redraws the open tab. */
+/** Reloads group data after a change; the open tab redraws with it. */
 async function settingsChanged(message) {
   if (message) setStatus(message);
   const id = state.group.id;
@@ -1242,39 +1264,35 @@ async function settingsChanged(message) {
   ]);
   if (!group || state.group?.id !== id) return;
   state.group = group;
-  $("group-name").textContent = group.name;
+  if (state.view === "group") $("group-name").textContent = group.name;
   setMembers(members || []);
   setChannels(channels);
   loadGroups();
   updateSettingsButton();
-  if (!$("settings-view").hidden) renderSettings();
+  if (settingsOpen()) renderSettings();
 }
 
 function section(title, ...children) {
   return el("section", { class: "settings-section" }, el("h3", { textContent: title }), ...children);
 }
 
-// General -----------------------------------------------------------------
+const saveButton = (label, onclick) => el("button", { type: "button", class: "primary small", textContent: label, onclick });
 
-function settingsGeneral() {
+// Overview ------------------------------------------------------------------
+
+function settingsOverview() {
   const g = state.group;
-  const name = el("input", { value: g.name, maxLength: 64 });
-  const limit = el("input", { type: "number", min: 0, max: 50, value: g.user_channel_limit ?? 0 });
   const parts = [];
   if (canAdmin("MANAGE_GROUP")) {
+    const name = el("input", { value: g.name, maxLength: 64 });
+    const limit = el("input", { type: "number", min: 0, max: 50, value: g.user_channel_limit ?? 0 });
     parts.push(section("Group",
       el("label", {}, "Name", name),
-      el("label", {}, "Own rooms per member (0 = none)", limit),
-      el("button", {
-        type: "button", class: "primary", textContent: "Save",
-        onclick: async () => {
-          const body = { name: name.value.trim(), user_channel_limit: Number(limit.value) };
-          if (await run(() => api("PATCH", `/groups/${g.id}`, body))) settingsChanged("Group saved");
-        },
+      el("label", {}, "Own rooms per member (0–50)", limit),
+      saveButton("Save", async () => {
+        const body = { name: name.value.trim(), user_channel_limit: Number(limit.value) };
+        if (await run(() => api("PATCH", `/groups/${g.id}`, body))) settingsChanged("Group saved");
       })));
-    parts.push(section("Invites",
-      el("p", { class: "muted", textContent: "Create a code and send it to the people you want to invite." }),
-      el("button", { type: "button", textContent: "Create invite code", onclick: () => $("group-invite").click() })));
   }
   if (isOwner()) {
     parts.push(section("Delete group",
@@ -1302,7 +1320,7 @@ function settingsGeneral() {
   return parts;
 }
 
-// Roles -------------------------------------------------------------------
+// Roles -----------------------------------------------------------------------
 
 async function loadRoles() {
   admin.roles = ((await run(() => api("GET", `/groups/${state.group.id}/roles`))) || [])
@@ -1310,14 +1328,17 @@ async function loadRoles() {
   if (!admin.roles.some((r) => r.id === admin.roleId)) admin.roleId = admin.roles[0]?.id || null;
 }
 
+function roleDot(role) {
+  return el("span", { class: "role-color", style: `background: ${colorToHex(role.color)}` });
+}
+
 async function settingsRoles() {
   await loadRoles();
   const list = el("div", { class: "role-list" },
     ...admin.roles.map((r) => el("button", {
       type: "button", class: `role-item${r.id === admin.roleId ? " active" : ""}`,
-      textContent: r.name,
       onclick: () => { admin.roleId = r.id; renderSettings(); },
-    })),
+    }, roleDot(r), ` ${r.name}`, belowMe(r) ? null : el("span", { class: "muted", textContent: " (locked)" }))),
     el("button", {
       type: "button", class: "small", textContent: "+ New role",
       onclick: async () => {
@@ -1331,47 +1352,42 @@ async function settingsRoles() {
       },
     }));
   const role = admin.roles.find((r) => r.id === admin.roleId);
-  return [el("div", { class: "settings-split" }, list, role ? roleEditor(role) : el("p", { class: "muted", textContent: "No roles." }))];
+  return [el("div", { class: "settings-split" }, list,
+    role ? roleEditor(role) : el("p", { class: "muted", textContent: "No roles." }))];
 }
 
 function roleEditor(role) {
-  const name = el("input", { value: role.name, maxLength: 64, disabled: role.everyone });
+  const locked = !belowMe(role);
+  const name = el("input", { value: role.name, maxLength: 64, disabled: locked || role.everyone });
+  const color = el("input", { type: "color", value: colorToHex(role.color), disabled: locked || role.everyone });
+  const position = el("input", { type: "number", value: role.position, min: 1, disabled: locked || role.everyone });
   const granted = flagSet(role.permissions);
   const boxes = PERMISSIONS.map(([flag, label]) => {
-    const box = el("input", { type: "checkbox", checked: granted.has(flag) });
+    const box = el("input", { type: "checkbox", checked: granted.has(flag), disabled: locked || !canGrant(flag) });
     box.dataset.flag = flag;
-    return el("label", { class: "inline perm" }, box, ` ${label}`);
+    return el("label", { class: "inline perm", title: canGrant(flag) ? "" : "You do not have this permission yourself" }, box, ` ${label}`);
   });
-  const index = admin.roles.findIndex((r) => r.id === role.id);
-  const above = admin.roles[index - 1];
-  const below = admin.roles[index + 1];
-  const swap = async (other) => {
-    if (!other || other.everyone) return;
-    const ok = await run(async () => {
-      await api("PATCH", `/groups/${state.group.id}/roles/${role.id}`, { position: other.position });
-      await api("PATCH", `/groups/${state.group.id}/roles/${other.id}`, { position: role.position });
-      return true;
-    });
-    if (ok) settingsChanged("Role order changed");
-  };
   return el("div", { class: "role-editor" },
-    el("label", {}, "Name", name),
-    role.everyone ? el("p", { class: "muted", textContent: "@everyone applies to all members of the group." }) : null,
-    el("div", { class: "perm-grid" }, ...boxes),
+    locked ? el("p", { class: "muted", textContent: "This role is at or above your highest role; you cannot change it." }) : null,
+    role.everyone ? el("p", { class: "muted", textContent: "@everyone applies to all members; only its permissions can change." }) : null,
     el("div", { class: "row" },
-      el("button", {
-        type: "button", class: "primary", textContent: "Save",
-        onclick: async () => {
-          const perms = new Set(boxes.map((b) => b.querySelector("input")).filter((b) => b.checked).map((b) => b.dataset.flag));
-          const body = { permissions: joinFlags(perms) };
-          if (!role.everyone) body.name = name.value.trim();
-          if (await run(() => api("PATCH", `/groups/${state.group.id}/roles/${role.id}`, body))) settingsChanged(`Role ${body.name || role.name} saved`);
-        },
+      el("label", {}, "Name", name),
+      el("label", { class: "narrow" }, "Color", color),
+      el("label", { class: "narrow" }, "Position", position)),
+    el("div", { class: "perm-grid" }, ...boxes),
+    locked ? null : el("div", { class: "row" },
+      saveButton("Save", async () => {
+        const perms = new Set(boxes.map((b) => b.querySelector("input")).filter((b) => b.checked).map((b) => b.dataset.flag));
+        const body = { permissions: joinFlags(perms) };
+        if (!role.everyone) {
+          body.name = name.value.trim();
+          body.color = hexToColor(color.value);
+          body.position = Number(position.value);
+        }
+        if (await run(() => api("PATCH", `/groups/${state.group.id}/roles/${role.id}`, body))) settingsChanged(`Role ${body.name || role.name} saved`);
       }),
-      role.everyone ? null : el("button", { type: "button", textContent: "Move up", disabled: !above, onclick: () => swap(above) }),
-      role.everyone ? null : el("button", { type: "button", textContent: "Move down", disabled: !below || below.everyone, onclick: () => swap(below) }),
       role.everyone ? null : el("button", {
-        type: "button", class: "danger", textContent: "Delete",
+        type: "button", class: "danger small", textContent: "Delete",
         onclick: async () => {
           if (!(await ask({ title: `Delete role ${role.name}?`, text: "Members lose the permissions of this role.", ok: "Delete" }))) return;
           if ((await run(() => api("DELETE", `/groups/${state.group.id}/roles/${role.id}`))) !== undefined) {
@@ -1382,30 +1398,33 @@ function roleEditor(role) {
       })));
 }
 
-// Members -----------------------------------------------------------------
+// Members ---------------------------------------------------------------------
 
 async function settingsMembers() {
   await loadRoles();
   const roles = admin.roles.filter((r) => !r.everyone);
+  const position = (m) => Math.max(0, ...roles.filter((r) => (m.role_ids || []).includes(r.id)).map((r) => r.position));
   const members = [...state.members.values()].sort((a, b) => (a.display_name || a.name).localeCompare(b.display_name || b.name));
   const rows = members.map((m) => {
     const owner = m.user_id === state.group.owner_id;
     const chips = roles.map((r) => {
-      const box = el("input", { type: "checkbox", checked: (m.role_ids || []).includes(r.id), disabled: !canAdmin("MANAGE_ROLES") });
+      const assignable = canAdmin("MANAGE_ROLES") && belowMe(r);
+      const box = el("input", { type: "checkbox", checked: (m.role_ids || []).includes(r.id), disabled: !assignable });
       box.addEventListener("change", async () => {
         const path = `/groups/${state.group.id}/members/${m.user_id}/roles/${r.id}`;
         const ok = await run(() => api(box.checked ? "PUT" : "DELETE", path));
         if (ok === undefined) box.checked = !box.checked;
         else settingsChanged(`${m.display_name || m.name}: ${box.checked ? "added to" : "removed from"} ${r.name}`);
       });
-      return el("label", { class: "inline chip" }, box, ` ${r.name}`);
+      return el("label", { class: "inline chip" }, box, " ", roleDot(r), ` ${r.name}`);
     });
+    const kickable = canAdmin("KICK_MEMBERS") && !owner && m.user_id !== myId() && position(m) < myPosition();
     return el("div", { class: "member-row" },
       el("span", { class: `dot${m.online ? " online" : ""}` }),
       el("span", { class: "member-name", textContent: m.display_name || m.name, title: `@${m.name}` }),
       owner ? el("span", { class: "badge", textContent: "owner" }) : null,
       el("span", { class: "chips" }, ...chips),
-      canAdmin("KICK_MEMBERS") && !owner && m.user_id !== myId() ? el("button", {
+      kickable ? el("button", {
         type: "button", class: "small danger", textContent: "Kick",
         onclick: async () => {
           if (!(await ask({ title: `Remove ${m.display_name || m.name} from the group?`, text: "They can come back with a new invite.", ok: "Kick" }))) return;
@@ -1413,32 +1432,56 @@ async function settingsMembers() {
         },
       }) : null);
   });
-  return [section("Members", roles.length ? null : el("p", { class: "muted", textContent: "Create roles in the Roles tab to give members extra permissions." }), ...rows)];
+  return [section("Members",
+    roles.length ? null : el("p", { class: "muted", textContent: "Create roles in the Roles tab to give members extra permissions." }),
+    ...rows)];
 }
 
-// Channels ----------------------------------------------------------------
+// Channels --------------------------------------------------------------------
+
+function categoryOptions(selected) {
+  return [el("option", { value: "", textContent: "No category", selected: !selected }),
+    ...state.categories.map((c) => el("option", { value: c.id, textContent: c.name, selected: c.id === selected }))];
+}
 
 function settingsChannels() {
   const g = state.group;
-  const categoryName = (id) => state.categories.find((c) => c.id === id)?.name || "No category";
-  const rows = state.channels.map((ch) => {
-    const name = el("input", { value: ch.name, maxLength: 64 });
-    const voice = el("input", { type: "checkbox", checked: ch.voice_enabled });
-    const row = el("div", { class: "channel-row" },
-      el("span", { class: "muted category-name", textContent: categoryName(ch.category_id) }),
-      name,
-      el("label", { class: "inline" }, voice, " Voice"),
-      el("button", {
-        type: "button", class: "small", textContent: "Save",
-        onclick: async () => {
-          const body = { name: name.value.trim(), voice_enabled: voice.checked };
-          if (await run(() => api("PATCH", `/channels/${ch.id}`, body))) settingsChanged(`#${body.name} saved`);
-        },
+  const categoryRows = state.categories.map((c) => {
+    const name = el("input", { value: c.name, maxLength: 64 });
+    const position = el("input", { type: "number", class: "pos", value: c.position });
+    const rooms = el("input", { type: "checkbox", checked: c.allow_user_channels });
+    return el("div", { class: "channel-row" },
+      name, el("label", { class: "inline" }, "Pos ", position),
+      el("label", { class: "inline" }, rooms, " Members may create rooms here"),
+      saveButton("Save", async () => {
+        const body = { name: name.value.trim(), position: Number(position.value), allow_user_channels: rooms.checked };
+        if (await run(() => api("PATCH", `/categories/${c.id}`, body))) settingsChanged(`Category ${body.name} saved`);
       }),
       el("button", {
-        type: "button", class: "small", textContent: "Permissions",
+        type: "button", class: "small danger", textContent: "Delete",
+        onclick: async () => {
+          if (!(await ask({ title: `Delete category ${c.name}?`, text: "Its channels stay and move out of the category.", ok: "Delete" }))) return;
+          if ((await run(() => api("DELETE", `/categories/${c.id}`))) !== undefined) settingsChanged(`Category ${c.name} deleted`);
+        },
+      }));
+  });
+  const channelRows = state.channels.map((ch) => {
+    const name = el("input", { value: ch.name, maxLength: 64 });
+    const position = el("input", { type: "number", class: "pos", value: ch.position });
+    const voice = el("input", { type: "checkbox", checked: ch.voice_enabled });
+    const category = el("select", {}, ...categoryOptions(ch.category_id));
+    const row = el("div", { class: "channel-row" },
+      name, el("label", { class: "inline" }, "Pos ", position), category,
+      el("label", { class: "inline" }, voice, " Voice"),
+      saveButton("Save", async () => {
+        const body = { name: name.value.trim(), position: Number(position.value), voice_enabled: voice.checked, category_id: category.value || null };
+        if (await run(() => api("PATCH", `/channels/${ch.id}`, body))) settingsChanged(`#${body.name} saved`);
+      }),
+      el("button", {
+        type: "button", class: `small${admin.overwriteChannel === ch.id ? " active" : ""}`, textContent: "Permissions",
         onclick: () => {
           admin.overwriteChannel = admin.overwriteChannel === ch.id ? null : ch.id;
+          admin.overwriteTarget = null;
           renderSettings();
         },
       }),
@@ -1455,38 +1498,29 @@ function settingsChannels() {
     return el("div", {}, row, editor);
   });
   const newName = el("input", { placeholder: "Channel name", maxLength: 64 });
-  const newCategory = el("select", {},
-    el("option", { value: "", textContent: "No category" }),
-    ...state.categories.map((c) => el("option", { value: c.id, textContent: c.name })));
+  const newCategory = el("select", {}, ...categoryOptions(null));
   const newVoice = el("input", { type: "checkbox", checked: true });
   const catName = el("input", { placeholder: "Category name", maxLength: 64 });
   const catRooms = el("input", { type: "checkbox" });
   return [
-    section("Channels", ...rows),
-    section("New channel", el("div", { class: "row" },
-      newName, newCategory, el("label", { class: "inline" }, newVoice, " Voice"),
-      el("button", {
-        type: "button", class: "primary", textContent: "Create",
-        onclick: async () => {
-          const body = { name: newName.value.trim(), category_id: newCategory.value || null, voice_enabled: newVoice.checked };
-          if (!body.name) return setStatus("Enter a channel name", true);
-          if (await run(() => api("POST", `/groups/${g.id}/channels`, body))) settingsChanged(`#${body.name} created`);
-        },
+    section("Categories", ...categoryRows, el("div", { class: "row new-row" },
+      catName, el("label", { class: "inline" }, catRooms, " Members may create rooms here"),
+      saveButton("Create category", async () => {
+        const body = { name: catName.value.trim(), allow_user_channels: catRooms.checked, position: state.categories.length + 1 };
+        if (!body.name) return setStatus("Enter a category name", true);
+        if (await run(() => api("POST", `/groups/${g.id}/categories`, body))) settingsChanged(`Category ${body.name} created`);
       }))),
-    section("New category", el("div", { class: "row" },
-      catName, el("label", { class: "inline" }, catRooms, " Members may create own rooms here"),
-      el("button", {
-        type: "button", class: "primary", textContent: "Create",
-        onclick: async () => {
-          const body = { name: catName.value.trim(), allow_user_channels: catRooms.checked, position: state.categories.length + 1 };
-          if (!body.name) return setStatus("Enter a category name", true);
-          if (await run(() => api("POST", `/groups/${g.id}/categories`, body))) settingsChanged(`Category ${body.name} created`);
-        },
+    section("Channels", ...channelRows, el("div", { class: "row new-row" },
+      newName, newCategory, el("label", { class: "inline" }, newVoice, " Voice"),
+      saveButton("Create channel", async () => {
+        const body = { name: newName.value.trim(), category_id: newCategory.value || null, voice_enabled: newVoice.checked };
+        if (!body.name) return setStatus("Enter a channel name", true);
+        if (await run(() => api("POST", `/groups/${g.id}/channels`, body))) settingsChanged(`#${body.name} created`);
       }))),
   ];
 }
 
-/** Per-channel allow/deny for one role or member at a time. */
+/** Allow/deny per permission for roles and members in one channel. */
 async function overwriteEditor(ch, container) {
   const list = (await run(() => api("GET", `/channels/${ch.id}/overwrites`))) || [];
   await loadRoles();
@@ -1496,50 +1530,122 @@ async function overwriteEditor(ch, container) {
       .map((r) => ({ kind: "role", id: r.id, label: `Role: ${r.name}` })),
     ...[...state.members.values()].map((m) => ({ kind: "member", id: m.user_id, label: `Member: ${m.display_name || m.name}` })),
   ];
-  const has = (t) => list.some((o) => o.target.kind === t.kind && o.target.id === t.id);
-  const picker = el("select", {}, ...targets.map((t, i) => el("option", {
-    value: String(i), textContent: `${t.label}${has(t) ? " (customised)" : ""}`,
-  })));
-  const firstCustom = targets.findIndex(has);
-  picker.value = String(firstCustom >= 0 ? firstCustom : 0);
-  const grid = el("div", { class: "overwrite-grid" });
-  const draw = () => {
-    const t = targets[Number(picker.value)];
-    const o = list.find((x) => x.target.kind === t.kind && x.target.id === t.id);
-    const allow = flagSet(o?.allow);
-    const deny = flagSet(o?.deny);
-    grid.replaceChildren(...CHANNEL_PERMISSIONS.map(([flag, label]) => {
-      const value = allow.has(flag) ? "allow" : deny.has(flag) ? "deny" : "inherit";
-      const group = `ow-${flag}`;
-      return el("div", { class: "overwrite-row", dataset: { flag } },
-        el("span", { textContent: label }),
-        ...["inherit", "allow", "deny"].map((v) => el("label", { class: `inline ow-${v}` },
-          el("input", { type: "radio", name: group, value: v, checked: v === value }), ` ${v}`)));
-    }));
-  };
-  picker.addEventListener("change", draw);
-  draw();
+  const key = (t) => `${t.kind}:${t.id}`;
+  const entryFor = (t) => list.find((o) => o.target.kind === t.kind && o.target.id === t.id);
+  const entries = targets.filter((t) => entryFor(t) || key(t) === admin.overwriteTarget);
+  if (!entries.some((t) => key(t) === admin.overwriteTarget)) admin.overwriteTarget = entries[0] ? key(entries[0]) : null;
+  const current = targets.find((t) => key(t) === admin.overwriteTarget);
+  const myChannelPerms = ch.permissions;
+
+  const entryList = el("div", { class: "overwrite-entries" },
+    ...entries.map((t) => el("button", {
+      type: "button", class: `small${key(t) === admin.overwriteTarget ? " active" : ""}`,
+      textContent: t.label + (entryFor(t) ? "" : " (new)"),
+      onclick: () => { admin.overwriteTarget = key(t); overwriteEditor(ch, container); },
+    })));
+  const addable = targets.filter((t) => !entries.includes(t));
+  const addSelect = el("select", {}, ...addable.map((t) => el("option", { value: key(t), textContent: t.label })));
+  const add = el("div", { class: "row" }, addSelect, el("button", {
+    type: "button", class: "small", textContent: "Add entry", disabled: !addable.length,
+    onclick: () => { admin.overwriteTarget = addSelect.value; overwriteEditor(ch, container); },
+  }));
+
+  if (!current) {
+    container.replaceChildren(
+      el("p", { class: "muted", textContent: "No channel-specific permissions yet. Add an entry for a role or member." }),
+      add);
+    return;
+  }
+  const o = entryFor(current);
+  const allow = flagSet(o?.allow);
+  const deny = flagSet(o?.deny);
+  const grid = el("div", { class: "overwrite-grid" }, ...CHANNEL_PERMISSIONS.map(([flag, label]) => {
+    const value = allow.has(flag) ? "allow" : deny.has(flag) ? "deny" : "inherit";
+    const allowed = canGrant(flag, myChannelPerms);
+    return el("div", { class: "overwrite-row", dataset: { flag }, title: allowed ? "" : "You do not have this permission in this channel" },
+      el("span", { class: allowed ? "" : "muted", textContent: label }),
+      ...["inherit", "allow", "deny"].map((v) => el("label", { class: `inline ow-${v}` },
+        el("input", { type: "radio", name: `ow-${flag}`, value: v, checked: v === value, disabled: !allowed }), ` ${v}`)));
+  }));
+  const path = `/channels/${ch.id}/overwrites/${current.kind}/${current.id}`;
   container.replaceChildren(
     el("p", { class: "muted", textContent: "Allow or deny permissions in this channel; inherit uses the roles." }),
-    picker, grid,
-    el("button", {
-      type: "button", class: "primary", textContent: "Save permissions",
-      onclick: async () => {
-        const t = targets[Number(picker.value)];
-        const allow = new Set();
-        const deny = new Set();
+    entryList, grid,
+    el("div", { class: "row" },
+      saveButton("Save", async () => {
+        const a = new Set();
+        const d = new Set();
         for (const row of grid.querySelectorAll(".overwrite-row")) {
           const v = row.querySelector("input:checked").value;
-          if (v === "allow") allow.add(row.dataset.flag);
-          if (v === "deny") deny.add(row.dataset.flag);
+          if (v === "allow") a.add(row.dataset.flag);
+          if (v === "deny") d.add(row.dataset.flag);
         }
-        const path = `/channels/${ch.id}/overwrites/${t.kind}/${t.id}`;
-        const ok = allow.size || deny.size
-          ? await run(() => api("PUT", path, { allow: joinFlags(allow), deny: joinFlags(deny) }))
+        const ok = a.size || d.size
+          ? await run(() => api("PUT", path, { allow: joinFlags(a), deny: joinFlags(d) }))
           : await run(() => api("DELETE", path));
         if (ok !== undefined) settingsChanged(`Permissions of #${ch.name} saved`);
+      }),
+      o ? el("button", {
+        type: "button", class: "small danger", textContent: "Remove entry",
+        onclick: async () => {
+          if ((await run(() => api("DELETE", path))) !== undefined) {
+            admin.overwriteTarget = null;
+            settingsChanged(`Entry removed from #${ch.name}`);
+          }
+        },
+      }) : null),
+    add);
+}
+
+// Invites ---------------------------------------------------------------------
+
+async function settingsInvites() {
+  const g = state.group;
+  const invites = (await run(() => api("GET", `/groups/${g.id}/invites`))) || [];
+  const rows = invites.map((inv) => el("div", { class: "member-row" },
+    el("span", { class: "code invite-code", textContent: inv.code }),
+    el("span", { class: "muted", textContent: `${inv.uses}${inv.max_uses ? ` / ${inv.max_uses}` : ""} uses` }),
+    el("span", { class: "muted", textContent: inv.expires_at ? `expires ${new Date(inv.expires_at).toLocaleString()}` : "never expires" }),
+    el("span", { class: "chips" }),
+    el("button", {
+      type: "button", class: "small", textContent: "Copy",
+      onclick: async () => {
+        try {
+          await navigator.clipboard.writeText(inv.code);
+          setStatus("Invite code copied");
+        } catch {
+          setStatus(`Invite code: ${inv.code}`);
+        }
       },
-    }));
+    }),
+    el("button", {
+      type: "button", class: "small danger", textContent: "Revoke",
+      onclick: async () => {
+        if ((await run(() => api("DELETE", `/groups/${g.id}/invites/${encodeURIComponent(inv.code)}`))) !== undefined) {
+          setStatus("Invite revoked");
+          renderSettings();
+        }
+      },
+    })));
+  const maxUses = el("input", { type: "number", min: 1, placeholder: "unlimited", class: "pos" });
+  const hours = el("input", { type: "number", min: 1, placeholder: "never", class: "pos" });
+  return [
+    section("Invites", ...(rows.length ? rows : [el("p", { class: "muted", textContent: "No active invites." })])),
+    section("New invite", el("div", { class: "row new-row" },
+      el("label", { class: "inline" }, "Max uses ", maxUses),
+      el("label", { class: "inline" }, "Expires after (hours) ", hours),
+      saveButton("Create invite", async () => {
+        const body = {
+          max_uses: maxUses.value ? Number(maxUses.value) : null,
+          expires_in_hours: hours.value ? Number(hours.value) : null,
+        };
+        const inv = await run(() => api("POST", `/groups/${g.id}/invites`, body));
+        if (inv) {
+          setStatus(`Invite ${inv.code} created`);
+          renderSettings();
+        }
+      }))),
+  ];
 }
 
 $("group-settings").addEventListener("click", () => openSettings());
