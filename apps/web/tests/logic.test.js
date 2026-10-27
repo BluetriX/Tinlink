@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  CHANNEL_PERMISSIONS, Gate, cameraGrid, cameraSize, MutedSpeechDetector, TypingTracker, can, canEditRole, formatPerms, memberPosition,
+  CHANNEL_PERMISSIONS, Gate, cameraGrid, cameraSize, MutedSpeechDetector, SpeakingTracker, TypingTracker, can, canEditRole, formatPerms, memberPosition,
   overwriteState, parsePerms, roleColor, setOverwriteState, highlightRanges, searchTerms, inputName, isUnread, mentionCandidates, mentionQuery, shareBitrate,
   shareSize, sortMembers, typingText,
 } from "../logic.js";
@@ -44,6 +44,19 @@ test("voice activation gate keeps word endings", () => {
   assert.equal(gate.update(-40, 100), true);
   assert.equal(gate.update(-70, 500), true);
   assert.equal(gate.update(-70, 601), false);
+});
+
+test("speaking follows the level with a short hold", () => {
+  const t = new SpeakingTracker(-60, 250);
+  assert.equal(t.update("a", -80, 0), false);
+  assert.equal(t.update("a", -55, 20), true);
+  assert.ok(t.speaking.has("a"));
+  assert.equal(t.update("a", -80, 200), false);
+  assert.equal(t.update("a", -80, 271), true);
+  assert.ok(!t.speaking.has("a"));
+  t.update("b", -40, 300);
+  assert.equal(t.remove("b"), true);
+  assert.equal(t.remove("b"), false);
 });
 
 test("muted speech fires after 5 s and then cools down", () => {

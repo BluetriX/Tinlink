@@ -1,7 +1,8 @@
 // Tinlink web client. Talks to the server it is served from; media runs in
 // the browser through the vendored LiveKit client. No framework, no build step.
 import {
-  Gate, MutedSpeechDetector, TypingTracker, can, cameraGrid, cameraSize, highlightRanges, searchTerms, inputName, isUnread, mentionCandidates, mentionQuery, shareBitrate,
+  COMPRESSORS, Gate, MutedSpeechDetector, SpeakingTracker, TypingTracker, can, cameraGrid, cameraSize, highlightRanges, searchTerms, inputName, isUnread,
+  mentionCandidates, mentionQuery, shareBitrate,
   shareSize, sortMembers, typingText,
 } from "./logic.js";
 import { createSettings, hasSettings } from "./admin.js";
@@ -1438,7 +1439,9 @@ const voice = {
   meter: null, // { node, source, clone }
   gate: new Gate(-50, 500),
   detector: new MutedSpeechDetector(),
-  speaking: new Set(), // identities
+  speaking: new SpeakingTracker(), // by identity
+  remoteMeters: new Map(), // identity -> { node, source }
+  rows: new Map(), // identity -> participant list entry
 };
 
 let audioContext = null;
@@ -1446,7 +1449,10 @@ let audioContext = null;
 /** Creates the audio context on a user gesture, as browsers require. */
 function unlockAudio() {
   try {
-    audioContext ??= new AudioContext();
+    if (!audioContext) {
+      audioContext = new AudioContext();
+      applyOutputToContext(settings.load().outputDevice);
+    }
     audioContext.resume();
   } catch {
     // no level meter and no beeps then
@@ -1456,6 +1462,11 @@ document.addEventListener("pointerdown", () => {
   unlockAudio();
   askNotificationPermission();
 }, { once: true });
+
+/** Remote audio routed through Web Audio (see applyVolume) plays on the context's device. */
+function applyOutputToContext(id) {
+  if (audioContext && "setSinkId" in audioContext) audioContext.setSinkId(id || "").catch(() => {});
+}
 
 function voiceMode() {
   return document.querySelector("input[name=mode]:checked").value;
@@ -1508,6 +1519,10 @@ function onLevel(db) {
     clearTimeout(onLevel.hintTimer);
     onLevel.hintTimer = setTimeout(() => { $("muted-hint").hidden = true; }, 6000);
   }
+  // The own dot shows what actually goes out.
+  const out = transmitting() && !serverMuted && micPublished() ? db : -Infinity;
+  const me = voice.room?.localParticipant.identity;
+  if (me && voice.speaking.update(me, out, now)) updateSpeaking();
   drawLevel(db);
 }
 
@@ -1548,6 +1563,40 @@ function stopMeter() {
   voice.meter.node.disconnect();
   voice.meter.clone.stop();
   voice.meter = null;
+}
+
+/** Measures what arrives from a remote participant, for their speaking dot. */
+async function startRemoteMeter(participant, track) {
+  const id = participant.identity;
+  stopRemoteMeter(id);
+  if (!audioContext) return;
+  const meter = { node: null, source: null };
+  voice.remoteMeters.set(id, meter);
+  try {
+    workletLoaded ??= audioContext.audioWorklet.addModule("level-worklet.js");
+    await workletLoaded;
+    if (voice.remoteMeters.get(id) !== meter) return;
+    meter.source = audioContext.createMediaStreamSource(new MediaStream([track.mediaStreamTrack]));
+    meter.node = new AudioWorkletNode(audioContext, "level-meter");
+    meter.node.port.onmessage = (ev) => {
+      if (voice.speaking.update(id, ev.data, performance.now())) updateSpeaking();
+    };
+    meter.source.connect(meter.node);
+  } catch (e) {
+    console.warn("remote level meter unavailable", e);
+  }
+}
+
+function stopRemoteMeter(id) {
+  const meter = voice.remoteMeters.get(id);
+  if (!meter) return;
+  voice.remoteMeters.delete(id);
+  meter.source?.disconnect();
+  if (meter.node) {
+    meter.node.port.onmessage = null;
+    meter.node.disconnect();
+  }
+  if (voice.speaking.remove(id)) updateSpeaking();
 }
 
 /** Joins a channel's voice; returns whether it worked. */
@@ -1620,6 +1669,7 @@ function wireRoom(room) {
         const audio = track.attach();
         $("audio-sink").append(audio);
         applyVolume(participant);
+        startRemoteMeter(participant, track);
       } else if (pub.source === LK.Track.Source.ScreenShare) {
         showScreen(participant, track);
       } else if (pub.source === LK.Track.Source.Camera) {
@@ -1627,16 +1677,12 @@ function wireRoom(room) {
       }
       renderParticipants();
     })
-    .on(E.TrackUnsubscribed, (track, pub) => {
+    .on(E.TrackUnsubscribed, (track, pub, participant) => {
+      if (track.kind === "audio") stopRemoteMeter(participant.identity);
       for (const node of track.detach()) node.remove();
       document.querySelector(`.screen[data-sid="${track.sid}"]`)?.remove();
       removeCamera(pub.trackSid);
       renderParticipants();
-    })
-    .on(E.ActiveSpeakersChanged, (speakers) => {
-      voice.speaking = new Set(speakers.map((p) => p.identity));
-      renderParticipants();
-      updateSpeaking();
     })
     .on(E.ParticipantConnected, renderParticipants)
     .on(E.ParticipantDisconnected, renderParticipants)
@@ -1695,6 +1741,8 @@ function wireRoom(room) {
 
 $("audio-start").addEventListener("click", async () => {
   await voice.room?.startAudio();
+  // startAudio unmutes every element, also those whose audio goes through Web Audio.
+  for (const p of voice.room?.remoteParticipants.values() || []) applyVolume(p);
   $("audio-start").hidden = !!voice.room?.canPlaybackAudio;
 });
 
@@ -1713,6 +1761,8 @@ function voiceJoinedUi(ch) {
 /** Resets everything voice related after leaving or losing the room. */
 function cleanupVoice() {
   stopMeter();
+  for (const id of [...voice.remoteMeters.keys()]) stopRemoteMeter(id);
+  voice.rows.clear();
   voice.micTrack?.stop();
   voice.micTrack = null;
   voice.room = null;
@@ -1793,24 +1843,78 @@ function volumes() {
   return settings.load().volumes || {};
 }
 
-/** Applies the local mute and volume of a remote participant. */
-function applyVolume(participant) {
-  if (participant.isLocal) return;
-  const muted = localMutes().has(participant.identity);
-  const volume = volumes()[participant.identity] ?? 1;
-  participant.setVolume(muted ? 0 : volume);
+function compressors() {
+  return settings.load().compressors || {};
 }
 
+/**
+ * Applies the local mute, volume and compressor of a remote participant.
+ * Volume above 100 % and the compressor need Web Audio; everyone else stays
+ * on the plain audio element, which keeps the browser's echo cancellation
+ * and output selection as they are.
+ */
+function applyVolume(participant) {
+  if (participant.isLocal) return;
+  const id = participant.identity;
+  const volume = volumes()[id] ?? 1;
+  const preset = COMPRESSORS[compressors()[id]] || null;
+  const webAudio = !!audioContext && (volume > 1 || !!preset);
+  const track = participant.getTrackPublication(LK.Track.Source.Microphone)?.audioTrack;
+  if (track) {
+    const route = webAudio ? compressors()[id] || "plain" : "element";
+    if (track.tinlinkRoute !== route) {
+      track.tinlinkRoute = route;
+      if (webAudio) {
+        track.setWebAudioPlugins(preset ? [createCompressor(preset)] : []);
+        track.setAudioContext(audioContext);
+      } else {
+        track.setAudioContext(undefined);
+      }
+    }
+    for (const node of track.attachedElements) node.muted = webAudio;
+  }
+  const muted = localMutes().has(id);
+  participant.setVolume(muted ? 0 : webAudio ? volume : Math.min(volume, 1));
+}
+
+function createCompressor(preset) {
+  const node = audioContext.createDynamicsCompressor();
+  for (const [key, value] of Object.entries(preset)) node[key].value = value;
+  return node;
+}
+
+/**
+ * Updates the participant list in place: rows are kept per person, so a
+ * volume slider being dragged is not replaced when someone starts talking.
+ */
 function renderParticipants() {
   const room = voice.room;
   const list = $("participants");
   if (!room) {
     list.replaceChildren();
+    voice.rows.clear();
     return;
   }
   const people = [room.localParticipant, ...room.remoteParticipants.values()];
+  const present = new Set(people.map((p) => p.identity));
+  for (const [id, li] of voice.rows) {
+    if (!present.has(id)) {
+      li.remove();
+      voice.rows.delete(id);
+    }
+  }
   const mutes = localMutes();
-  list.replaceChildren(...people.map((p) => {
+  people.forEach((p, index) => {
+    let li = voice.rows.get(p.identity);
+    if (!li) {
+      li = el("li", { dataset: { identity: p.identity } },
+        el("div", { class: "who" }),
+        p.isLocal ? null : listenControls(p),
+        el("div", { class: "stats" }));
+      voice.rows.set(p.identity, li);
+    }
+    if (list.children[index] !== li) list.insertBefore(li, list.children[index] || null);
+
     const mic = p.getTrackPublication(LK.Track.Source.Microphone);
     const screen = p.getTrackPublication(LK.Track.Source.ScreenShare);
     const camera = p.getTrackPublication(LK.Track.Source.Camera);
@@ -1825,22 +1929,56 @@ function renderParticipants() {
         textContent: mutes.has(p.identity) ? "Unmute" : "Mute",
         title: "Mute or unmute for you only",
         onclick: () => toggleLocalMute(p),
-      }),
-      el("input", {
-        type: "range", class: "volume", min: "0", max: "1", step: "0.05",
-        value: String(volumes()[p.identity] ?? 1), title: "Volume (for you only)",
-        oninput: (ev) => setVolume(p, Number(ev.target.value)),
       }));
-    return el("li", {},
-      el("div", { class: "who" },
-        el("span", { class: `dot${voice.speaking.has(p.identity) ? " speaking" : ""}` }),
-        el("span", { title: p.identity, textContent: p.isLocal ? `${name} (you)` : name }),
-        micMuted ? el("span", { class: "badge", textContent: "muted" }) : null,
-        screen ? el("span", { class: "badge", textContent: "screen" }) : null,
-        camera ? el("span", { class: "badge", textContent: "cam" }) : null,
-        actions),
-      el("div", { class: "stats", textContent: p.connectionQuality && p.connectionQuality !== "unknown" ? `connection ${p.connectionQuality}` : "" }));
-  }));
+    li.querySelector(".who").replaceWith(el("div", { class: "who" },
+      el("span", { class: `dot${voice.speaking.speaking.has(p.identity) ? " speaking" : ""}` }),
+      el("span", { class: "ellipsis", title: p.identity, textContent: p.isLocal ? `${name} (you)` : name }),
+      micMuted ? el("span", { class: "badge", textContent: "muted" }) : null,
+      screen ? el("span", { class: "badge", textContent: "screen" }) : null,
+      camera ? el("span", { class: "badge", textContent: "cam" }) : null,
+      actions));
+    li.querySelector(".stats").textContent =
+      p.connectionQuality && p.connectionQuality !== "unknown" ? `connection ${p.connectionQuality}` : "";
+  });
+}
+
+/** The second line of a remote participant: volume and compressor, for you only. */
+function listenControls(p) {
+  const id = p.identity;
+  const pct = el("span", { class: "pct" });
+  const showPct = (v) => { pct.textContent = `${Math.round(v * 100)} %`; };
+  const volume = volumes()[id] ?? 1;
+  showPct(volume);
+  const compressor = el("select", {
+    class: "compressor", title: "Compressor: evens out loud and quiet speech (for you only)",
+    onchange: (ev) => {
+      const next = { ...compressors() };
+      if (ev.target.value) next[id] = ev.target.value;
+      else delete next[id];
+      settings.save({ compressors: next });
+      applyVolume(p);
+    },
+  },
+  el("option", { value: "", textContent: "off" }),
+  el("option", { value: "light", textContent: "light" }),
+  el("option", { value: "strong", textContent: "strong" }));
+  compressor.value = compressors()[id] || "";
+  return el("div", { class: "listen" },
+    el("input", {
+      type: "range", class: "volume", min: "0", max: "2", step: "0.05",
+      value: String(volume), title: "Volume (for you only), up to 200 %",
+      oninput: (ev) => {
+        showPct(Number(ev.target.value));
+        setVolume(p, Number(ev.target.value));
+      },
+      ondblclick: (ev) => {
+        ev.target.value = "1";
+        showPct(1);
+        setVolume(p, 1);
+      },
+    }),
+    pct,
+    el("label", { title: compressor.title }, "Comp.", compressor));
 }
 
 function toggleLocalMute(p) {
@@ -1857,14 +1995,18 @@ function setVolume(p, value) {
   applyVolume(p);
 }
 
-/** Lights up speakers in the channel tree (identities are "name@domain"). */
+/** Lights up speakers in the participant list and the channel tree (identities are "name@domain"). */
 function updateSpeaking() {
-  const speaking = new Set([...voice.speaking].map((id) => id.split("@")[0]));
+  const ids = voice.speaking.speaking;
+  for (const [id, li] of voice.rows) {
+    li.querySelector(".dot")?.classList.toggle("speaking", ids.has(id));
+  }
+  const speaking = new Set([...ids].map((id) => id.split("@")[0]));
   for (const li of document.querySelectorAll(".voice-users li")) {
     li.querySelector(".dot").classList.toggle("speaking", speaking.has(li.dataset.user));
   }
   for (const tile of document.querySelectorAll(".camera")) {
-    tile.classList.toggle("speaking", voice.speaking.has(tile.dataset.identity));
+    tile.classList.toggle("speaking", ids.has(tile.dataset.identity));
   }
 }
 
@@ -1964,7 +2106,7 @@ function showCamera(participant, track) {
   });
   const name = participant.name || participant.identity;
   const tile = el("div", {
-    class: `camera${participant.isLocal ? " local" : ""}${voice.speaking.has(participant.identity) ? " speaking" : ""}`,
+    class: `camera${participant.isLocal ? " local" : ""}${voice.speaking.speaking.has(participant.identity) ? " speaking" : ""}`,
     dataset: { sid: track.sid, identity: participant.identity },
   },
   video,
@@ -2138,6 +2280,7 @@ $("input-device").addEventListener("change", async () => {
 $("output-device").addEventListener("change", async () => {
   const id = $("output-device").value;
   settings.save({ outputDevice: id });
+  applyOutputToContext(id);
   await run(() => voice.room?.switchActiveDevice("audiooutput", id || "default"));
 });
 

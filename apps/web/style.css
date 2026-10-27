@@ -376,6 +376,10 @@ label.inline input {
   gap: 6px;
 }
 
+.who .ellipsis {
+  min-width: 0;
+}
+
 .who .actions {
   margin-left: auto;
   display: flex;
@@ -756,9 +760,46 @@ input[type="range"] {
   width: 100%;
 }
 
-.volume {
-  width: 70px;
-  vertical-align: middle;
+/* Second line of a participant: volume and compressor, for you only. */
+.listen {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0 0 14px;
+}
+
+.listen .volume {
+  flex: 1;
+  min-width: 40px;
+}
+
+.listen .pct {
+  width: 4em;
+  white-space: nowrap;
+  text-align: right;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.listen label {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.listen .compressor {
+  display: inline-block;
+  width: auto;
+  margin: 0;
+  font-size: 11px;
+  padding: 1px 2px;
+  min-width: 6em;
 }
 
 #autocomplete {

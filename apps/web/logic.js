@@ -55,6 +55,48 @@ export class Gate {
 }
 
 /**
+ * Who is audible right now, measured on the audio itself: a participant
+ * counts as speaking while their level reached `audibleDb` within the last
+ * `holdMs`. Reacts within one level sample, unlike the server's active
+ * speaker updates.
+ */
+export class SpeakingTracker {
+  constructor(audibleDb = -60, holdMs = 250) {
+    this.audibleDb = audibleDb;
+    this.holdMs = holdMs;
+    this.lastLoud = new Map();
+    this.speaking = new Set();
+  }
+
+  /** Feeds one level sample; returns whether the speaking set changed. */
+  update(id, levelDb, nowMs) {
+    if (levelDb >= this.audibleDb) this.lastLoud.set(id, nowMs);
+    const on = nowMs - (this.lastLoud.get(id) ?? -Infinity) <= this.holdMs;
+    if (on === this.speaking.has(id)) return false;
+    if (on) this.speaking.add(id);
+    else this.speaking.delete(id);
+    return true;
+  }
+
+  /** Forgets a participant; returns whether the speaking set changed. */
+  remove(id) {
+    this.lastLoud.delete(id);
+    return this.speaking.delete(id);
+  }
+
+  clear() {
+    this.lastLoud.clear();
+    this.speaking.clear();
+  }
+}
+
+/** Per-person compressor presets for what you hear (DynamicsCompressorNode values). */
+export const COMPRESSORS = {
+  light: { threshold: -30, knee: 10, ratio: 3, attack: 0.005, release: 0.2 },
+  strong: { threshold: -45, knee: 6, ratio: 8, attack: 0.003, release: 0.25 },
+};
+
+/**
  * Detects talking while nothing is transmitted: fires after `talkMs` of
  * speech (pauses up to `gapMs` count as speech), then not again for
  * `cooldownMs`.
