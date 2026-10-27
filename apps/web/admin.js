@@ -181,7 +181,7 @@ export function createSettings(ctx) {
         title: "New role",
         fields: [{ id: "name", label: "Name" }],
         submit: (v) => v.name ? tryText(async () => {
-          const role = await api("POST", `/groups/${groupId}/roles`, { name: v.name, position: 1 });
+          const role = await api("POST", `/groups/${groupId}/roles`, { name: v.name });
           view.editing = role.id;
           await reload();
         }) : "Enter a name.",

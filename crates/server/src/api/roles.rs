@@ -97,7 +97,10 @@ pub async fn create(
     let member = Member::load(&state.db, group_id, user.id).await?;
     member.require(Permissions::MANAGE_ROLES)?;
     let name = validate_name(req.name.as_deref().unwrap_or_default())?;
-    let position = req.position.unwrap_or(1);
+    let position = match req.position {
+        Some(p) => p,
+        None => default_position(&state, &member).await?,
+    };
     let perms = req.permissions.unwrap_or_default();
     check_grant(&member, Some(perms), Some(position))?;
 
@@ -115,6 +118,20 @@ pub async fn create(
     .await?;
     state.events.group(EventKind::GroupUpdated, group_id, ());
     Ok((StatusCode::CREATED, Json(role_info(row))))
+}
+
+/// New roles go above the existing ones, but below the creator's highest role.
+async fn default_position(state: &AppState, member: &Member) -> AppResult<i32> {
+    let highest: i32 = sqlx::query_scalar(
+        "SELECT COALESCE(max(position), 0) FROM roles WHERE group_id = $1 AND id <> group_id",
+    )
+    .bind(member.group_id)
+    .fetch_one(&state.db)
+    .await?;
+    Ok(highest
+        .saturating_add(1)
+        .min(member.highest_position().saturating_sub(1))
+        .max(1))
 }
 
 async fn load_role(state: &AppState, group_id: Uuid, role_id: Uuid) -> AppResult<i32> {

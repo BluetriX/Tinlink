@@ -149,3 +149,38 @@ async fn invites_can_be_listed_and_revoked(db: PgPool) {
     let res = app.delete(&format!("{invites}/{open_code}"), &owner).await;
     assert_eq!(res.status, StatusCode::NOT_FOUND);
 }
+
+#[sqlx::test(migrator = "tinlink_server::MIGRATOR")]
+async fn new_roles_go_on_top_below_the_creator(db: PgPool) {
+    let app = TestApp::new(db);
+    let (owner, _) = app.register("owner").await;
+    let (alice, alice_id) = app.register("alice").await;
+    let group = app.create_group(&owner, "G").await;
+    app.invite_and_join(&owner, &group, &alice).await;
+    let roles = format!("/api/groups/{group}/roles");
+
+    let a = app.post(&roles, &owner, json!({ "name": "A" })).await;
+    assert_eq!(a.body["position"], 1);
+    let b = app.post(&roles, &owner, json!({ "name": "B" })).await;
+    assert_eq!(b.body["position"], 2);
+    let admin = app
+        .post(
+            &roles,
+            &owner,
+            json!({ "name": "Admin", "permissions": "MANAGE_ROLES" }),
+        )
+        .await;
+    assert_eq!(admin.body["position"], 3);
+    let admin_id = admin.body["id"].as_str().unwrap();
+    app.put(
+        &format!("/api/groups/{group}/members/{alice_id}/roles/{admin_id}"),
+        &owner,
+        json!({}),
+    )
+    .await;
+
+    // Alice ranks at 3, so her new role lands at 2, just below her.
+    let c = app.post(&roles, &alice, json!({ "name": "C" })).await;
+    assert_eq!(c.status, StatusCode::CREATED, "{:?}", c.body);
+    assert_eq!(c.body["position"], 2);
+}
