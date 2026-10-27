@@ -38,6 +38,7 @@
       <header class="bar">
         <strong id="group-name">No group</strong>
         <button id="group-invite" type="button" class="small" hidden title="Create an invite code">Invite</button>
+        <button id="group-settings" type="button" class="small" hidden title="Group settings">Settings</button>
       </header>
       <div id="channel-tree"></div>
 
@@ -100,6 +101,10 @@
       </header>
       <div id="stage"></div>
       <div id="messages" aria-live="polite"></div>
+      <div id="settings" hidden>
+        <nav id="settings-tabs"></nav>
+        <div id="settings-body"></div>
+      </div>
       <div id="search-results" hidden>
         <div class="search-head">
           <span id="search-summary"></span>

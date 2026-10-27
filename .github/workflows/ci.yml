@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v5
       # Vendored JavaScript must match the pinned upstream release.
       - run: cd apps/web/vendor && sha256sum -c SHA256SUMS
-      - run: node --check apps/web/app.js && node --check apps/web/level-worklet.js
+      - run: node --check apps/web/app.js && node --check apps/web/admin.js && node --check apps/web/level-worklet.js
       - run: node --test apps/web/tests/*.test.js
 
   rust:

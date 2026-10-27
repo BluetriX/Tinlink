@@ -180,3 +180,73 @@ export function highlightRanges(text, terms) {
   }
   return merged;
 }
+
+/** Group-wide permissions shown in the role editor, in display order. */
+export const PERMISSIONS = [
+  ["VIEW_CHANNEL", "View channels"],
+  ["SEND_MESSAGES", "Send messages"],
+  ["ATTACH_FILES", "Attach files"],
+  ["CONNECT", "Join voice"],
+  ["SPEAK", "Speak"],
+  ["SHARE_SCREEN", "Share screen"],
+  ["CREATE_OWN_CHANNELS", "Create own channels"],
+  ["MANAGE_CHANNELS", "Manage channels"],
+  ["MANAGE_MESSAGES", "Delete others' messages"],
+  ["MUTE_MEMBERS", "Mute members"],
+  ["MOVE_MEMBERS", "Move and disconnect members"],
+  ["KICK_MEMBERS", "Kick members"],
+  ["MANAGE_ROLES", "Manage roles"],
+  ["MANAGE_GROUP", "Manage group and invites"],
+  ["ADMINISTRATOR", "Administrator (everything)"],
+];
+
+/** Permissions that make sense per channel, for the overwrite editor. */
+export const CHANNEL_PERMISSIONS = PERMISSIONS.filter(([flag]) => [
+  "VIEW_CHANNEL", "SEND_MESSAGES", "ATTACH_FILES", "CONNECT", "SPEAK", "SHARE_SCREEN",
+  "MANAGE_CHANNELS", "MANAGE_MESSAGES", "MUTE_MEMBERS", "MOVE_MEMBERS",
+].includes(flag));
+
+/** "A | B" → Set of flags. */
+export function parsePerms(perms) {
+  return new Set((perms || "").split("|").map((p) => p.trim()).filter(Boolean));
+}
+
+/** Set of flags → "A | B" in display order; unknown flags are kept at the end. */
+export function formatPerms(flags) {
+  const known = PERMISSIONS.map(([f]) => f).filter((f) => flags.has(f));
+  const unknown = [...flags].filter((f) => !PERMISSIONS.some(([k]) => k === f));
+  return [...known, ...unknown].join(" | ");
+}
+
+/** "allow", "deny" or "inherit" for one flag of an overwrite. */
+export function overwriteState(ow, flag) {
+  if (parsePerms(ow.allow).has(flag)) return "allow";
+  if (parsePerms(ow.deny).has(flag)) return "deny";
+  return "inherit";
+}
+
+/** The overwrite with one flag set to "allow", "deny" or "inherit". */
+export function setOverwriteState(ow, flag, value) {
+  const allow = parsePerms(ow.allow);
+  const deny = parsePerms(ow.deny);
+  allow.delete(flag);
+  deny.delete(flag);
+  if (value === "allow") allow.add(flag);
+  if (value === "deny") deny.add(flag);
+  return { ...ow, allow: formatPerms(allow), deny: formatPerms(deny) };
+}
+
+/** Whether a role can be edited by someone whose highest role is at `myPosition`. */
+export function canEditRole(role, myPosition) {
+  return role.everyone || role.position < myPosition;
+}
+
+/** Highest role position of a member (0 = only @everyone). */
+export function memberPosition(member, roles) {
+  return Math.max(0, ...roles.filter((r) => (member.role_ids || []).includes(r.id)).map((r) => r.position));
+}
+
+/** CSS color for a role color stored as 0xRRGGBB, or null. */
+export function roleColor(color) {
+  return color == null ? null : `#${color.toString(16).padStart(6, "0")}`;
+}

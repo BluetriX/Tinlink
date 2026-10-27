@@ -2,7 +2,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  Gate, MutedSpeechDetector, TypingTracker, can, highlightRanges, searchTerms, inputName, isUnread, mentionCandidates, mentionQuery, shareBitrate,
+  CHANNEL_PERMISSIONS, Gate, MutedSpeechDetector, TypingTracker, can, canEditRole, formatPerms, memberPosition,
+  overwriteState, parsePerms, roleColor, setOverwriteState, highlightRanges, searchTerms, inputName, isUnread, mentionCandidates, mentionQuery, shareBitrate,
   shareSize, sortMembers, typingText,
 } from "../logic.js";
 
@@ -131,4 +132,35 @@ test("highlight ranges at word starts", () => {
   // Not inside words, overlaps merge.
   assert.deepEqual(highlightRanges("Salamipizza", ["piz"]), []);
   assert.deepEqual(highlightRanges("freitag", ["fr", "frei"]), [[0, 4]]);
+});
+
+test("permission strings", () => {
+  const set = parsePerms("SEND_MESSAGES | VIEW_CHANNEL|FUTURE_FLAG");
+  assert.ok(set.has("VIEW_CHANNEL") && set.has("FUTURE_FLAG"));
+  assert.equal(formatPerms(set), "VIEW_CHANNEL | SEND_MESSAGES | FUTURE_FLAG");
+  assert.equal(formatPerms(parsePerms("")), "");
+  assert.equal(CHANNEL_PERMISSIONS.length, 10);
+});
+
+test("overwrite tri-state", () => {
+  let ow = { target: { kind: "role", id: "r" }, allow: "", deny: "VIEW_CHANNEL" };
+  assert.equal(overwriteState(ow, "VIEW_CHANNEL"), "deny");
+  assert.equal(overwriteState(ow, "SPEAK"), "inherit");
+  ow = setOverwriteState(ow, "VIEW_CHANNEL", "allow");
+  ow = setOverwriteState(ow, "SPEAK", "deny");
+  assert.deepEqual([ow.allow, ow.deny], ["VIEW_CHANNEL", "SPEAK"]);
+  ow = setOverwriteState(ow, "SPEAK", "inherit");
+  assert.equal(ow.deny, "");
+  assert.equal(ow.target.id, "r");
+});
+
+test("role hierarchy helpers", () => {
+  const roles = [{ id: "a", position: 3 }, { id: "b", position: 1 }];
+  assert.equal(memberPosition({ role_ids: ["a", "b"] }, roles), 3);
+  assert.equal(memberPosition({ role_ids: [] }, roles), 0);
+  assert.ok(canEditRole({ position: 1 }, 3));
+  assert.ok(!canEditRole({ position: 3 }, 3));
+  assert.ok(canEditRole({ everyone: true, position: 0 }, 0));
+  assert.equal(roleColor(0x3366ff), "#3366ff");
+  assert.equal(roleColor(null), null);
 });

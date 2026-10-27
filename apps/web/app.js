@@ -4,6 +4,7 @@ import {
   Gate, MutedSpeechDetector, TypingTracker, can, highlightRanges, searchTerms, inputName, isUnread, mentionCandidates, mentionQuery, shareBitrate,
   shareSize, sortMembers, typingText,
 } from "./logic.js";
+import { createSettings, hasSettings } from "./admin.js";
 
 const LK = window.LivekitClient;
 
@@ -302,6 +303,7 @@ function renderEmptyGroup() {
   state.group = null;
   $("group-name").textContent = "No group yet";
   $("group-invite").hidden = true;
+  $("group-settings").hidden = true;
   $("channel-tree").replaceChildren(
     el("p", { class: "muted", style: "padding: 0 12px", textContent: "Create a group or join one with an invite code (+ on the left)." }),
   );
@@ -400,6 +402,7 @@ async function selectGroup(id) {
   renderGroups();
   $("group-name").textContent = group.name;
   $("group-invite").hidden = !can(group.permissions, "MANAGE_GROUP");
+  $("group-settings").hidden = !hasSettings(group.permissions);
   const saved = settings.load().channels || {};
   const channel = state.channels.find((c) => c.id === saved[id]) || state.channels[0] || null;
   openChannel(channel);
@@ -445,13 +448,46 @@ function refreshGroup() {
     setChannels(channels);
     if (state.view !== "group") return;
     $("group-name").textContent = group.name;
+    $("group-invite").hidden = !can(group.permissions, "MANAGE_GROUP");
+    $("group-settings").hidden = !hasSettings(group.permissions);
+    if (settingsView.isOpen) {
+      $("channel-name").textContent = `Settings · ${group.name}`;
+      settingsView.refresh();
+      return;
+    }
     if (state.channel) {
       const fresh = state.channels.find((c) => c.id === state.channel.id);
       if (!fresh) openChannel(state.channels[0] || null);
-      else state.channel = fresh;
+      else {
+        state.channel = fresh;
+        // Permissions may have changed.
+        $("composer").hidden = !can(fresh.permissions, "SEND_MESSAGES");
+        $("attach").hidden = !can(fresh.permissions, "ATTACH_FILES");
+      }
     }
   }, 150);
 }
+
+// --------------------------------------------------------------- settings
+
+const settingsView = createSettings({
+  api, el, ask, tryText, setStatus, state,
+  // The open channel may have been deleted meanwhile.
+  onClose: () => openChannel(state.channels.find((c) => c.id === state.channel?.id) || state.channels[0] || null),
+  onGroupDeleted: () => onGatewayEvent({ type: "group_deleted", group_id: state.group?.id }),
+});
+
+$("group-settings").addEventListener("click", () => {
+  if (settingsView.isOpen) {
+    settingsView.close();
+    openChannel(state.channels.find((c) => c.id === state.channel?.id) || state.channels[0] || null);
+    return;
+  }
+  closeSearch();
+  for (const id of ["messages", "typing", "composer", "pending-files"]) $(id).hidden = true;
+  $("channel-name").textContent = `Settings · ${state.group.name}`;
+  settingsView.open();
+});
 
 // --------------------------------------------------------------- channels
 
@@ -574,6 +610,8 @@ async function createChannel(category) {
 
 function openChannel(ch) {
   closeSearch();
+  settingsView.close();
+  for (const id of ["messages", "typing", "pending-files"]) $(id).hidden = false;
   state.channel = ch;
   state.messages = [];
   state.noOlder = false;
@@ -1073,6 +1111,7 @@ function showDms() {
   state.view = "dms";
   $("group-name").textContent = "Direct messages";
   $("group-invite").hidden = true;
+  $("group-settings").hidden = true;
   $("member-panel").hidden = true;
   renderGroups();
   renderDmButton();

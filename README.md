@@ -232,7 +232,8 @@ It covers what the desktop client does (chat with unread markers, @mentions
 with notifications, edit and delete, uploads, direct messages, message search, online status
 and typing indicators, voice with push-to-talk or voice
 activation and an adjustable threshold, per-person volume, screen sharing with
-selectable resolution and frame rate, moderation, password change), with two
+selectable resolution and frame rate, moderation, password change, and group
+settings for roles, members, categories, channel permissions and invites), with two
 browser limits: push-to-talk only works while the tab has focus, and screen
 sharing uses the browser's encoder. `LIVEKIT_PUBLIC_URL` must be a `wss://` URL,
 since an HTTPS page may not open plain WebSocket connections.
