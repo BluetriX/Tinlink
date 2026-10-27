@@ -20,6 +20,7 @@ bitflags! {
         const ATTACH_FILES        = 1 << 2;
         const CONNECT             = 1 << 3;
         const SPEAK               = 1 << 4;
+        /// Share the screen and the webcam.
         const SHARE_SCREEN        = 1 << 5;
         /// Create own channels within the limits configured for the group.
         const CREATE_OWN_CHANNELS = 1 << 6;

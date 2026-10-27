@@ -691,7 +691,7 @@ async fn voice_tokens_reflect_channel_permissions(db: PgPool) {
     assert_eq!(claims["video"]["room"], general.as_str());
     assert_eq!(
         claims["video"]["canPublishSources"],
-        json!(["microphone", "screen_share", "screen_share_audio"])
+        json!(["microphone", "camera", "screen_share", "screen_share_audio"])
     );
 
     // No screen sharing for @everyone in this channel.

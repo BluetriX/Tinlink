@@ -1,7 +1,7 @@
 // Tinlink web client. Talks to the server it is served from; media runs in
 // the browser through the vendored LiveKit client. No framework, no build step.
 import {
-  Gate, MutedSpeechDetector, TypingTracker, can, highlightRanges, searchTerms, inputName, isUnread, mentionCandidates, mentionQuery, shareBitrate,
+  Gate, MutedSpeechDetector, TypingTracker, can, cameraGrid, cameraSize, highlightRanges, searchTerms, inputName, isUnread, mentionCandidates, mentionQuery, shareBitrate,
   shareSize, sortMembers, typingText,
 } from "./logic.js";
 import { createSettings, hasSettings } from "./admin.js";
@@ -1530,12 +1530,15 @@ function wireRoom(room) {
         applyVolume(participant);
       } else if (pub.source === LK.Track.Source.ScreenShare) {
         showScreen(participant, track);
+      } else if (pub.source === LK.Track.Source.Camera) {
+        showCamera(participant, track);
       }
       renderParticipants();
     })
-    .on(E.TrackUnsubscribed, (track) => {
+    .on(E.TrackUnsubscribed, (track, pub) => {
       for (const node of track.detach()) node.remove();
       document.querySelector(`.screen[data-sid="${track.sid}"]`)?.remove();
+      removeCamera(pub.trackSid);
       renderParticipants();
     })
     .on(E.ActiveSpeakersChanged, (speakers) => {
@@ -1549,9 +1552,16 @@ function wireRoom(room) {
     .on(E.TrackUnmuted, renderParticipants)
     .on(E.TrackPublished, renderParticipants)
     .on(E.TrackUnpublished, renderParticipants)
-    .on(E.LocalTrackPublished, renderParticipants)
+    .on(E.LocalTrackPublished, (pub) => {
+      if (pub.source === LK.Track.Source.Camera && pub.track) showCamera(room.localParticipant, pub.track);
+      renderParticipants();
+    })
     .on(E.LocalTrackUnpublished, (pub) => {
       if (pub.source === LK.Track.Source.ScreenShare) shareStopped();
+      if (pub.source === LK.Track.Source.Camera) {
+        removeCamera(pub.trackSid);
+        cameraStopped();
+      }
       renderParticipants();
     })
     .on(E.ParticipantPermissionsChanged, (_prev, participant) => {
@@ -1603,6 +1613,7 @@ function voiceJoinedUi(ch) {
   $("share-start").hidden = !can(ch.permissions, "SHARE_SCREEN") || !navigator.mediaDevices?.getDisplayMedia;
   $("share-stop").hidden = true;
   $("share-info").hidden = true;
+  cameraStopped();
   $("tx").hidden = false;
   applyTransmit();
 }
@@ -1617,10 +1628,11 @@ function cleanupVoice() {
   voice.speaking.clear();
   $("voice-status").textContent = "Not in voice";
   $("voice-status").classList.add("muted");
-  for (const id of ["voice-leave", "share-start", "share-stop", "share-info", "tx", "muted-hint", "audio-start"]) $(id).hidden = true;
+  for (const id of ["voice-leave", "share-start", "share-stop", "cam-start", "cam-stop", "share-info", "tx", "muted-hint", "audio-start"]) $(id).hidden = true;
   $("participants").replaceChildren();
   $("audio-sink").replaceChildren();
   $("stage").replaceChildren();
+  $("cameras").replaceChildren();
   updateSpeaking();
 }
 
@@ -1709,6 +1721,7 @@ function renderParticipants() {
   list.replaceChildren(...people.map((p) => {
     const mic = p.getTrackPublication(LK.Track.Source.Microphone);
     const screen = p.getTrackPublication(LK.Track.Source.ScreenShare);
+    const camera = p.getTrackPublication(LK.Track.Source.Camera);
     const micMuted = !mic || mic.isMuted;
     const name = p.name || p.identity;
     const actions = p.isLocal ? null : el("span", { class: "actions" },
@@ -1732,6 +1745,7 @@ function renderParticipants() {
         el("span", { title: p.identity, textContent: p.isLocal ? `${name} (you)` : name }),
         micMuted ? el("span", { class: "badge", textContent: "muted" }) : null,
         screen ? el("span", { class: "badge", textContent: "screen" }) : null,
+        camera ? el("span", { class: "badge", textContent: "cam" }) : null,
         actions),
       el("div", { class: "stats", textContent: p.connectionQuality && p.connectionQuality !== "unknown" ? `connection ${p.connectionQuality}` : "" }));
   }));
@@ -1756,6 +1770,9 @@ function updateSpeaking() {
   const speaking = new Set([...voice.speaking].map((id) => id.split("@")[0]));
   for (const li of document.querySelectorAll(".voice-users li")) {
     li.querySelector(".dot").classList.toggle("speaking", speaking.has(li.dataset.user));
+  }
+  for (const tile of document.querySelectorAll(".camera")) {
+    tile.classList.toggle("speaking", voice.speaking.has(tile.dataset.identity));
   }
 }
 
@@ -1840,6 +1857,93 @@ function shareStopped() {
   $("share-info").hidden = true;
 }
 
+// -------------------------------------------------------------- cameras
+
+/** Adds a grid tile for a camera track, local (mirrored preview) or remote. */
+function showCamera(participant, track) {
+  if (!track.sid || document.querySelector(`.camera[data-sid="${CSS.escape(track.sid)}"]`)) return;
+  const video = track.attach();
+  video.muted = true;
+  video.playsInline = true;
+  video.title = "Double-click for fullscreen";
+  video.addEventListener("dblclick", () => {
+    if (document.fullscreenElement) document.exitFullscreen();
+    else video.requestFullscreen().catch(() => {});
+  });
+  const name = participant.name || participant.identity;
+  const tile = el("div", {
+    class: `camera${participant.isLocal ? " local" : ""}${voice.speaking.has(participant.identity) ? " speaking" : ""}`,
+    dataset: { sid: track.sid, identity: participant.identity },
+  },
+  video,
+  el("span", { class: "label", textContent: participant.isLocal ? `${name} (you)` : name }));
+  // Own camera first, the others in join order.
+  if (participant.isLocal) $("cameras").prepend(tile);
+  else $("cameras").append(tile);
+  layoutCameras();
+}
+
+function removeCamera(sid) {
+  if (!sid) return;
+  const tile = document.querySelector(`.camera[data-sid="${CSS.escape(sid)}"]`);
+  if (!tile) return;
+  tile.querySelector("video")?.remove();
+  tile.remove();
+  layoutCameras();
+}
+
+function layoutCameras() {
+  const { cols, rows } = cameraGrid($("cameras").children.length);
+  $("cameras").style.setProperty("--cols", cols);
+  $("cameras").style.setProperty("--rows", rows);
+}
+
+function cameraAllowed() {
+  return !!voice.room && can(voice.channel?.permissions, "SHARE_SCREEN") && !!navigator.mediaDevices?.getUserMedia;
+}
+
+function cameraOn() {
+  return !!voice.room?.localParticipant.getTrackPublication(LK.Track.Source.Camera);
+}
+
+function cameraStopped() {
+  $("cam-start").hidden = !cameraAllowed() || cameraOn();
+  $("cam-stop").hidden = !cameraOn();
+}
+
+$("cam-start").addEventListener("click", async () => {
+  const room = voice.room;
+  if (!room || cameraOn()) return;
+  $("cam-start").disabled = true;
+  const [width, height] = cameraSize(Number($("camera-quality").value));
+  let track = null;
+  try {
+    track = await LK.createLocalVideoTrack({
+      deviceId: settings.load().cameraDevice || undefined,
+      resolution: { width, height, frameRate: 30 },
+    });
+    if (voice.room !== room) throw new Error("left the channel");
+    // Simulcast: small grid tiles receive a lower layer than fullscreen viewers.
+    await room.localParticipant.publishTrack(track, {
+      source: LK.Track.Source.Camera, simulcast: true, videoCodec: "vp8",
+    });
+  } catch (e) {
+    track?.stop();
+    if (e.name === "NotAllowedError") setStatus("Camera access was denied by the browser.", true);
+    else setStatus(`Cannot start the camera: ${e.message || e}`, true);
+  } finally {
+    $("cam-start").disabled = false;
+    cameraStopped();
+  }
+});
+
+$("cam-stop").addEventListener("click", async () => {
+  const pub = voice.room?.localParticipant.getTrackPublication(LK.Track.Source.Camera);
+  // Unpublishing also stops the capture, so the camera light goes off.
+  if (pub?.track) await run(() => voice.room.localParticipant.unpublishTrack(pub.track));
+  cameraStopped();
+});
+
 // --------------------------------------------------------- voice settings
 
 for (const radio of document.querySelectorAll("input[name=mode]")) {
@@ -1914,13 +2018,13 @@ async function loadAudioDevices() {
   if (!navigator.mediaDevices?.enumerateDevices) return;
   const devices = await navigator.mediaDevices.enumerateDevices();
   const saved = settings.load();
-  for (const [kind, select] of [["audioinput", $("input-device")], ["audiooutput", $("output-device")]]) {
+  const selects = [["audioinput", $("input-device"), "inputDevice"], ["audiooutput", $("output-device"), "outputDevice"], ["videoinput", $("camera-device"), "cameraDevice"]];
+  for (const [kind, select, key] of selects) {
     const list = devices.filter((d) => d.kind === kind && d.deviceId && d.deviceId !== "default");
     select.replaceChildren(
       el("option", { value: "", textContent: "System default" }),
       ...list.map((d, i) => el("option", { value: d.deviceId, textContent: d.label || `Device ${i + 1}` })),
     );
-    const key = kind === "audioinput" ? "inputDevice" : "outputDevice";
     if (list.some((d) => d.deviceId === saved[key])) select.value = saved[key];
   }
   // Selecting an output needs setSinkId, which not every browser has.
@@ -1945,6 +2049,13 @@ $("output-device").addEventListener("change", async () => {
   await run(() => voice.room?.switchActiveDevice("audiooutput", id || "default"));
 });
 
+$("camera-device").addEventListener("change", async () => {
+  const id = $("camera-device").value;
+  settings.save({ cameraDevice: id });
+  const pub = voice.room?.localParticipant.getTrackPublication(LK.Track.Source.Camera);
+  if (pub?.track) await run(() => pub.track.restartTrack({ deviceId: id || undefined }));
+});
+
 // Device labels are only visible after the first microphone permission.
 navigator.mediaDevices?.addEventListener?.("devicechange", loadAudioDevices);
 $("voice-settings").addEventListener("toggle", loadAudioDevices);
@@ -1966,6 +2077,8 @@ async function init() {
   }
   if (saved.shareResolution) $("share-resolution").value = saved.shareResolution;
   if (saved.shareFps) $("share-fps").value = saved.shareFps;
+  if (saved.cameraQuality) $("camera-quality").value = saved.cameraQuality;
+  $("camera-quality").addEventListener("change", () => settings.save({ cameraQuality: $("camera-quality").value }));
   $("share-resolution").addEventListener("change", () => settings.save({ shareResolution: $("share-resolution").value }));
   $("share-fps").addEventListener("change", () => settings.save({ shareFps: $("share-fps").value }));
   api("GET", "/info").then((info) => {

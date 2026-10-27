@@ -1163,7 +1163,7 @@ const PERMISSIONS = [
   ["ATTACH_FILES", "Attach files"],
   ["CONNECT", "Join voice"],
   ["SPEAK", "Speak"],
-  ["SHARE_SCREEN", "Share screen"],
+  ["SHARE_SCREEN", "Share screen and camera"],
   ["CREATE_OWN_CHANNELS", "Create own rooms"],
   ["MANAGE_CHANNELS", "Manage channels"],
   ["MANAGE_MESSAGES", "Delete others' messages"],

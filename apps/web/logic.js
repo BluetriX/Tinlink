@@ -101,6 +101,18 @@ export function shareBitrate(height, fps) {
   return Math.round(base * (fps > 30 ? 1.5 : fps < 30 ? 0.6 : 1));
 }
 
+/** Columns and rows of the webcam grid for `count` tiles: as square as possible, wider than tall. */
+export function cameraGrid(count) {
+  const cols = Math.max(1, Math.ceil(Math.sqrt(count)));
+  return { cols, rows: Math.max(1, Math.ceil(count / cols)) };
+}
+
+/** Capture size of a webcam quality choice (by height, 16:9). */
+export function cameraSize(height) {
+  const sizes = { 720: [1280, 720], 540: [960, 540], 360: [640, 360] };
+  return sizes[height] || sizes[720];
+}
+
 /** Name of a key or mouse button as used for push-to-talk. */
 export function inputName(ev) {
   if (ev.type.startsWith("mouse") || ev.type.startsWith("pointer")) {
@@ -188,7 +200,7 @@ export const PERMISSIONS = [
   ["ATTACH_FILES", "Attach files"],
   ["CONNECT", "Join voice"],
   ["SPEAK", "Speak"],
-  ["SHARE_SCREEN", "Share screen"],
+  ["SHARE_SCREEN", "Share screen and camera"],
   ["CREATE_OWN_CHANNELS", "Create own channels"],
   ["MANAGE_CHANNELS", "Manage channels"],
   ["MANAGE_MESSAGES", "Delete others' messages"],

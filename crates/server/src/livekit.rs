@@ -48,7 +48,7 @@ pub fn publish_sources(perms: Permissions) -> Vec<&'static str> {
         sources.push("microphone");
     }
     if perms.contains(Permissions::SHARE_SCREEN) {
-        sources.extend(["screen_share", "screen_share_audio"]);
+        sources.extend(["camera", "screen_share", "screen_share_audio"]);
     }
     sources
 }

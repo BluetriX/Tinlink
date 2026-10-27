@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  CHANNEL_PERMISSIONS, Gate, MutedSpeechDetector, TypingTracker, can, canEditRole, formatPerms, memberPosition,
+  CHANNEL_PERMISSIONS, Gate, cameraGrid, cameraSize, MutedSpeechDetector, TypingTracker, can, canEditRole, formatPerms, memberPosition,
   overwriteState, parsePerms, roleColor, setOverwriteState, highlightRanges, searchTerms, inputName, isUnread, mentionCandidates, mentionQuery, shareBitrate,
   shareSize, sortMembers, typingText,
 } from "../logic.js";
@@ -163,4 +163,15 @@ test("role hierarchy helpers", () => {
   assert.ok(canEditRole({ everyone: true, position: 0 }, 0));
   assert.equal(roleColor(0x3366ff), "#3366ff");
   assert.equal(roleColor(null), null);
+});
+
+test("webcam grid stays close to square", () => {
+  assert.deepEqual(cameraGrid(0), { cols: 1, rows: 1 });
+  assert.deepEqual(cameraGrid(1), { cols: 1, rows: 1 });
+  assert.deepEqual(cameraGrid(2), { cols: 2, rows: 1 });
+  assert.deepEqual(cameraGrid(3), { cols: 2, rows: 2 });
+  assert.deepEqual(cameraGrid(5), { cols: 3, rows: 2 });
+  assert.deepEqual(cameraGrid(10), { cols: 4, rows: 3 });
+  assert.deepEqual(cameraSize(360), [640, 360]);
+  assert.deepEqual(cameraSize(undefined), [1280, 720]);
 });

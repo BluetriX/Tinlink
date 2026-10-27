@@ -48,6 +48,8 @@
           <button id="voice-leave" type="button" class="small" hidden>Leave</button>
           <button id="share-start" type="button" class="small" hidden>Share screen</button>
           <button id="share-stop" type="button" class="small" hidden>Stop sharing</button>
+          <button id="cam-start" type="button" class="small" hidden>Camera</button>
+          <button id="cam-stop" type="button" class="small" hidden>Camera off</button>
           <button id="audio-start" type="button" class="small" hidden>Enable audio</button>
         </div>
         <div id="share-info" class="share-info" hidden></div>
@@ -67,6 +69,16 @@
           <div class="level"><div class="fill" id="level-fill"></div><div class="mark" id="level-mark"></div></div>
           <label>Microphone <select id="input-device"></select></label>
           <label>Output <select id="output-device"></select></label>
+          <div class="row">
+            <label>Camera <select id="camera-device"></select></label>
+            <label>Quality
+              <select id="camera-quality">
+                <option value="720" selected>720p</option>
+                <option value="540">540p</option>
+                <option value="360">360p</option>
+              </select>
+            </label>
+          </div>
           <div class="row">
             <label>Share resolution
               <select id="share-resolution">
@@ -99,6 +111,7 @@
         <strong id="channel-name">Select a channel</strong>
         <input id="search-input" type="search" placeholder="Search messages" maxlength="200" aria-label="Search messages">
       </header>
+      <div id="cameras"></div>
       <div id="stage"></div>
       <div id="messages" aria-live="polite"></div>
       <div id="settings" hidden>
