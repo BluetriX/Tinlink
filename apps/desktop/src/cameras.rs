@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use livekit::prelude::*;
 use livekit::webrtc::native::yuv_helper;
-use livekit::webrtc::prelude::RtcVideoTrack;
+use livekit::webrtc::prelude::{RtcVideoTrack, VideoBuffer};
 use livekit::webrtc::video_stream::native::NativeVideoStream;
 use tauri::AppHandle;
 use tauri::window::{Window, WindowBuilder};
