@@ -5527,6 +5527,7 @@ dependencies = [
  "tauri-build",
  "tauri-winrt-notification",
  "tinlink-hwenc",
+ "tinlink-webcam",
  "tinlink-winput",
  "tokio",
  "tokio-tungstenite 0.29.0",
@@ -5581,6 +5582,15 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "tinlink-webcam"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+ "tracing",
+ "windows",
 ]
 
 [[package]]

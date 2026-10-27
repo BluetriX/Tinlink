@@ -151,7 +151,7 @@ fn render_loop(
 /// The viewer is a plain window without a WebView, so it gets no click or
 /// key events; while it has focus, double-click and F11 toggle fullscreen and
 /// Escape leaves it.
-fn input_loop(window: &Window, stop: &AtomicBool) {
+pub(crate) fn input_loop(window: &Window, stop: &AtomicBool) {
     use tinlink_winput::Key;
     const DOUBLE_CLICK: Duration = Duration::from_millis(400);
     let (mut button, mut f11, mut escape) = (false, false, false);

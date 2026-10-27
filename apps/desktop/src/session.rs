@@ -1,5 +1,5 @@
 //! A connection to one LiveKit room: microphone, playout, screen share
-//! viewers and periodic state snapshots for the UI.
+//! viewers, webcams and periodic state snapshots for the UI.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,6 +16,8 @@ use tokio::task::JoinHandle;
 
 use crate::AppState;
 use crate::audio::AudioPrefs;
+use crate::camera::{CameraSettings, CameraShare};
+use crate::cameras::CameraGrid;
 use crate::mic::{MicHooks, MicMonitor};
 use crate::screen::{ScreenShare, ShareInfo, ShareSettings};
 use crate::stats::{self, LinkStats};
@@ -39,6 +41,9 @@ pub struct Session {
     identity: String,
     livekit_url: String,
     share: Option<ScreenShare>,
+    camera: Option<CameraShare>,
+    /// All webcams of the room (own one included) in one window.
+    cameras: Arc<CameraGrid>,
     tasks: Vec<JoinHandle<()>>,
     /// The platform audio device module (WASAPI capture and playout).
     _audio: PlatformAudio,
@@ -218,12 +223,14 @@ impl Session {
         let mic_id = mic.rtc_track().id();
         let link_stats = Arc::new(Mutex::new(HashMap::new()));
         let viewers = Viewers::default();
+        let cameras = Arc::new(CameraGrid::new(app.clone(), room.clone()));
         let tasks = vec![
             tokio::spawn(event_loop(
                 app.clone(),
                 room.clone(),
                 mic.clone(),
                 viewers.clone(),
+                cameras.clone(),
                 events,
             )),
             tokio::spawn(snapshot_loop(app.clone(), room.clone(), mic, link_stats)),
@@ -237,6 +244,8 @@ impl Session {
             identity: token.identity,
             livekit_url: token.url,
             share: None,
+            camera: None,
+            cameras,
             tasks,
             _audio: audio,
             mic_monitor,
@@ -311,8 +320,41 @@ impl Session {
         }
     }
 
+    /// Turns the webcam on (again with new settings if it is on).
+    pub async fn start_camera(
+        &mut self,
+        device: Option<String>,
+        settings: CameraSettings,
+    ) -> Result<()> {
+        self.stop_camera().await;
+        let camera = CameraShare::start(&self.room, device, settings).await?;
+        let local = self.room.local_participant();
+        self.cameras.add(
+            camera.track().sid(),
+            local.identity().to_string(),
+            local.name(),
+            camera.track().rtc_track(),
+            true,
+        );
+        self.camera = Some(camera);
+        Ok(())
+    }
+
+    pub async fn stop_camera(&mut self) {
+        if let Some(camera) = self.camera.take() {
+            self.cameras.remove(&camera.track().sid());
+            camera.stop(&self.room).await;
+        }
+    }
+
+    /// Opens the camera window again after it was closed.
+    pub fn show_cameras(&self) -> Result<()> {
+        self.cameras.show()
+    }
+
     pub async fn leave(mut self, voice: &Voice) {
         self.stop_share().await;
+        self.stop_camera().await;
         voice.release_mic(&self.mic_id);
         for task in &self.tasks {
             // Dropping the event loop closes all viewer windows.
@@ -348,13 +390,15 @@ fn mic_published(room: &Room) -> bool {
         .any(|p| p.source() == TrackSource::Microphone)
 }
 
-/// Opens a viewer window for every subscribed screen share, and publishes
-/// the microphone again when a moderator lifts a server mute.
+/// Opens a viewer window for every subscribed screen share, adds webcams
+/// to the camera grid, and publishes the microphone again when a moderator
+/// lifts a server mute.
 async fn event_loop(
     app: AppHandle,
     room: Arc<Room>,
     mic: LocalAudioTrack,
     viewers: Viewers,
+    cameras: Arc<CameraGrid>,
     mut events: mpsc::UnboundedReceiver<RoomEvent>,
 ) {
     // Dropping the viewers (on leave) closes their windows.
@@ -389,8 +433,22 @@ async fn event_loop(
                     Err(e) => tracing::error!("cannot open screen viewer: {e:#}"),
                 }
             }
+            RoomEvent::TrackSubscribed {
+                track: RemoteTrack::Video(track),
+                publication,
+                participant,
+            } if publication.source() == TrackSource::Camera => {
+                cameras.add(
+                    publication.sid(),
+                    participant.identity().to_string(),
+                    participant.name(),
+                    track.rtc_track(),
+                    false,
+                );
+            }
             RoomEvent::TrackUnsubscribed { publication, .. } => {
                 viewers.lock().unwrap().remove(&publication.sid());
+                cameras.remove(&publication.sid());
             }
             RoomEvent::ParticipantPermissionChanged {
                 participant: Participant::Local(_),
@@ -461,6 +519,7 @@ struct ParticipantView {
     /// Remote participants only: muted for this client.
     locally_muted: bool,
     sharing_screen: bool,
+    camera: bool,
     stats: Option<LinkStats>,
 }
 
@@ -502,6 +561,10 @@ async fn snapshot_loop(
                 .track_publications()
                 .values()
                 .any(|p| p.source() == TrackSource::Screenshare),
+            camera: local
+                .track_publications()
+                .values()
+                .any(|p| p.source() == TrackSource::Camera),
             stats: stats.get(&local_identity).cloned(),
             identity: local_identity,
             is_local: true,
@@ -529,6 +592,7 @@ async fn snapshot_loop(
                 sharing_screen: pubs
                     .values()
                     .any(|p| p.source() == TrackSource::Screenshare),
+                camera: pubs.values().any(|p| p.source() == TrackSource::Camera),
                 stats: stats.get(&identity).cloned(),
                 identity,
                 is_local: false,

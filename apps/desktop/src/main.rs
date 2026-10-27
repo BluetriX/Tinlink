@@ -5,6 +5,8 @@ mod account;
 mod audio;
 mod backend;
 mod border;
+mod camera;
+mod cameras;
 mod mic;
 mod ptt;
 mod screen;
@@ -332,6 +334,41 @@ async fn stop_share(state: State<'_, AppState>) -> CmdResult<()> {
     Ok(())
 }
 
+#[tauri::command]
+fn list_cameras() -> Vec<camera::CameraSource> {
+    camera::list_sources()
+}
+
+#[tauri::command]
+async fn start_camera(
+    state: State<'_, AppState>,
+    device: Option<String>,
+    settings: camera::CameraSettings,
+) -> CmdResult<()> {
+    let mut slot = state.session.lock().await;
+    let session = slot.as_mut().ok_or("not connected")?;
+    session
+        .start_camera(device, settings)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn stop_camera(state: State<'_, AppState>) -> CmdResult<()> {
+    if let Some(session) = state.session.lock().await.as_mut() {
+        session.stop_camera().await;
+    }
+    Ok(())
+}
+
+/// Opens the camera grid again after it was closed.
+#[tauri::command]
+async fn show_cameras(state: State<'_, AppState>) -> CmdResult<()> {
+    let slot = state.session.lock().await;
+    let session = slot.as_ref().ok_or("not connected")?;
+    session.show_cameras().map_err(|e| format!("{e:#}"))
+}
+
 /// Creates the main window from the config. A `--profile` gets its own
 /// WebView data folder (separate settings); debug builds open a DevTools
 /// port when `TINLINK_DEVTOOLS_PORT` is set, for UI automation.
@@ -441,6 +478,10 @@ fn main() {
             list_screens,
             start_share,
             stop_share,
+            list_cameras,
+            start_camera,
+            stop_camera,
+            show_cameras,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

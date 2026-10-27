@@ -236,6 +236,7 @@ async function showMain(account) {
   $("profile").hidden = !account;
   $("logout").textContent = account ? "Log out" : "Back";
   await loadScreens();
+  await loadCameras();
   $("dm-button").parentElement.hidden = !account;
   if (!account) return;
   await loadGroups();
@@ -1985,6 +1986,8 @@ function voiceJoined(ch) {
   $("share-start").hidden = !(ch.dev || can(ch.permissions, "SHARE_SCREEN"));
   $("share-stop").hidden = true;
   $("share-info").hidden = true;
+  $("cam-start").hidden = !(ch.dev || can(ch.permissions, "SHARE_SCREEN"));
+  $("cam-stop").hidden = true;
   $("tx").hidden = false;
 }
 
@@ -1993,7 +1996,7 @@ function voiceLeft() {
   state.snapshot = null;
   $("voice-status").textContent = "Not in voice";
   $("voice-status").classList.add("muted");
-  for (const id of ["voice-leave", "share-start", "share-stop", "share-info", "tx", "muted-hint"]) $(id).hidden = true;
+  for (const id of ["voice-leave", "share-start", "share-stop", "cam-start", "cam-stop", "cams-show", "share-info", "tx", "muted-hint"]) $(id).hidden = true;
   $("participants").replaceChildren();
   participantRows.clear();
   $("meter-fill").style.width = "0";
@@ -2054,6 +2057,57 @@ $("share-stop").addEventListener("click", async () => {
   setStatus("Stopped sharing");
 });
 
+// ---------------------------------------------------------------- cameras
+
+function cameraSettings() {
+  return { height: Number($("camera-quality").value) };
+}
+
+async function startCamera() {
+  $("cam-start").disabled = true;
+  const ok = await run(() => invoke("start_camera", {
+    device: $("camera-device").value || null,
+    settings: cameraSettings(),
+  }).then(() => true));
+  $("cam-start").disabled = false;
+  if (!ok) return false;
+  $("cam-start").hidden = true;
+  $("cam-stop").hidden = false;
+  return true;
+}
+
+$("cam-start").addEventListener("click", startCamera);
+
+$("cam-stop").addEventListener("click", async () => {
+  await run(() => invoke("stop_camera"));
+  $("cam-stop").hidden = true;
+  $("cam-start").hidden = !state.voiceChannel;
+});
+
+$("cams-show").addEventListener("click", () => run(() => invoke("show_cameras")));
+
+// Another camera or quality while the camera is on restarts it.
+for (const id of ["camera-device", "camera-quality"]) {
+  $(id).addEventListener("change", async () => {
+    settings.save({ cameraDevice: $("camera-device").value, cameraQuality: $("camera-quality").value });
+    if ($("cam-stop").hidden) return;
+    if (!(await startCamera())) {
+      $("cam-start").hidden = false;
+      $("cam-stop").hidden = true;
+    }
+  });
+}
+
+async function loadCameras() {
+  const cameras = (await run(() => invoke("list_cameras"))) || [];
+  const saved = settings.load();
+  $("camera-device").replaceChildren(
+    el("option", { value: "", textContent: cameras.length ? "Default" : "No camera found" }),
+    ...cameras.map((c) => el("option", { value: c.id, textContent: c.name })),
+  );
+  if (cameras.some((c) => c.id === saved.cameraDevice)) $("camera-device").value = saved.cameraDevice;
+}
+
 function fmt(value, unit, digits = 1) {
   return value == null ? "-" : `${value.toFixed(digits)} ${unit}`;
 }
@@ -2078,6 +2132,7 @@ function participantRow(p) {
     name: el("span", { title: p.identity }),
     muted: el("span", { class: "badge", textContent: "muted" }),
     screen: el("span", { class: "badge", textContent: "screen" }),
+    camera: el("span", { class: "badge", textContent: "cam" }),
     watch: el("button", {
       type: "button", class: "small", textContent: "Watch", title: "Open the shared screen",
       onclick: () => run(() => invoke("watch_screen", { identity: p.identity })),
@@ -2089,7 +2144,7 @@ function participantRow(p) {
     stats: el("div", { class: "stats" }),
   };
   row.li = el("li", {},
-    el("div", { class: "who" }, row.dot, row.name, row.muted, row.screen,
+    el("div", { class: "who" }, row.dot, row.name, row.muted, row.screen, row.camera,
       p.isLocal ? null : el("span", { class: "actions" }, row.watch, row.mute)),
     row.stats);
   return row;
@@ -2120,6 +2175,7 @@ listen("room-state", (ev) => {
     row.muted.hidden = !p.micMuted;
     row.screen.hidden = !p.sharingScreen || !p.isLocal;
     row.watch.hidden = !p.sharingScreen;
+    row.camera.hidden = !p.camera;
     row.mute.textContent = p.locallyMuted ? "Unmute" : "Mute";
     row.mute.classList.toggle("on", p.locallyMuted);
     row.stats.textContent = renderStats(p.stats);
@@ -2129,6 +2185,7 @@ listen("room-state", (ev) => {
       $("tx").classList.toggle("on", p.transmitting);
     }
   });
+  $("cams-show").hidden = !snapshot.participants.some((p) => p.camera);
   for (const [identity, row] of participantRows) {
     if (!seen.has(identity)) {
       row.li.remove();
@@ -2313,6 +2370,7 @@ async function init() {
   if (saved.pttKey) await run(() => invoke("set_ptt_key", { key: saved.pttKey }));
   if (saved.shareHeight) $("share-height").value = saved.shareHeight;
   if (saved.shareFps) $("share-fps").value = saved.shareFps;
+  if (saved.cameraQuality) $("camera-quality").value = saved.cameraQuality;
   const threshold = saved.vaThreshold ?? -50;
   $("va-threshold").value = String(threshold);
   showThreshold(threshold);

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["apps/desktop", "crates/hwenc", "crates/protocol", "crates/server", "crates/winput"]
+members = ["apps/desktop", "crates/hwenc", "crates/protocol", "crates/server", "crates/webcam", "crates/winput"]
 # The desktop app needs platform SDKs (WebView2, libwebrtc); it is built
 # explicitly with `-p tinlink-desktop` and in its own CI job.
 default-members = ["crates/protocol", "crates/server"]

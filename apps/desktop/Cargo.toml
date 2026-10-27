@@ -21,7 +21,8 @@ base64.workspace = true
 bytemuck = "1"
 cpal = "0.18"
 futures-util = "0.3"
-# All media (capture, Opus, AEC, playout, screen capture, video encode/decode)
+# All media (capture, Opus, AEC, playout, screen capture, video encode/decode;
+# webcam capture comes from tinlink-webcam)
 # runs natively in libwebrtc via the LiveKit SDK, never in the WebView.
 livekit = { version = "0.9", features = ["native-tls"] }
 native-tls = "0.2"
@@ -29,6 +30,7 @@ percent-encoding = "2"
 reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "native-tls"] }
 softbuffer = "0.4"
 tinlink-hwenc = { path = "../../crates/hwenc" }
+tinlink-webcam = { path = "../../crates/webcam" }
 tinlink-winput = { path = "../../crates/winput" }
 # "unstable" enables plain windows without a webview, used for the screen viewer.
 tauri = { version = "2", features = ["unstable"] }
