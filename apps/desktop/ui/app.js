@@ -231,11 +231,9 @@ async function showMain(account) {
   state.account = account;
   $("login-view").hidden = true;
   $("main-view").hidden = false;
-  $("me").textContent = account
-    ? `${account.user.display_name || account.user.name} @ ${new URL(account.server).host}`
-    : "Developer mode";
+  renderMe();
   $("groups").hidden = !account;
-  $("change-password").hidden = !account;
+  $("profile").hidden = !account;
   $("logout").textContent = account ? "Log out" : "Back";
   await loadScreens();
   $("dm-button").parentElement.hidden = !account;
@@ -273,9 +271,8 @@ function renderGroups() {
       type: "button",
       class: g.id === state.group?.id && state.view === "group" ? "active" : "",
       title: g.name,
-      textContent: initials(g.name),
       onclick: () => selectGroup(g.id),
-    }),
+    }, g.icon_id ? imageEl(g.icon_id) : initials(g.name)),
     g.mention_count ? el("span", { class: "mention-badge", textContent: String(g.mention_count) }) : null)));
 }
 
@@ -368,6 +365,125 @@ function trackNewMessage(e) {
 
 function initials(name) {
   return name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join("") || "?";
+}
+
+// ------------------------------------------------- avatars and icons
+
+/** Edge length of uploaded icons; the server accepts up to 256 KB. */
+const ICON_SIZE = 128;
+/** Image id -> promise of a data URL. Ids never change their content. */
+const imageCache = new Map();
+
+/** An <img> for a server image; the CSP only allows data URLs, so the
+ * backend fetches it. */
+function imageEl(id, props = {}) {
+  if (!imageCache.has(id)) {
+    imageCache.set(id, invoke("image_data", { url: `/api/images/${id}` }).catch((e) => {
+      imageCache.delete(id);
+      throw e;
+    }));
+  }
+  const img = el("img", { alt: "", ...props });
+  imageCache.get(id).then((src) => { img.src = src; }).catch(() => {});
+  return img;
+}
+
+function hue(text) {
+  let h = 0;
+  for (const c of text) h = (h * 31 + c.codePointAt(0)) % 360;
+  return h;
+}
+
+/** A round avatar: the picture, or the first letter on a colored circle.
+ * `size` is "small", "medium" or "large". */
+function avatar(user, size = "small") {
+  const name = user?.display_name || user?.name || "?";
+  if (user?.avatar_id) return el("span", { class: `avatar ${size}` }, imageEl(user.avatar_id));
+  const node = el("span", { class: `avatar ${size}`, textContent: initials(name).slice(0, 1) });
+  node.style.background = `hsl(${hue(user?.name || name)} 45% 45%)`;
+  return node;
+}
+
+/** The channel's icon image, emoji or a plain `#`. */
+function channelIcon(ch) {
+  if (ch.icon_id) return imageEl(ch.icon_id, { class: "channel-icon" });
+  return el("span", { class: "channel-icon", textContent: ch.emoji || "#" });
+}
+
+/** What we know about a user: name, display name and avatar. */
+function userInfo(id) {
+  if (!id) return null;
+  if (id === myId()) return state.account.user;
+  return state.members.get(id) || state.dms.find((d) => d.user.id === id)?.user || null;
+}
+
+/** Lets the user pick an image, crops it to a centered square and scales
+ * it to a data URL; null when cancelled. */
+function pickImage() {
+  return new Promise((resolve) => {
+    const input = el("input", { type: "file", accept: "image/png,image/jpeg,image/gif,image/webp" });
+    input.addEventListener("change", () => resolve(input.files[0] || null));
+    input.addEventListener("cancel", () => resolve(null));
+    input.click();
+  });
+}
+
+async function scaleImage(file) {
+  const bitmap = await createImageBitmap(file).catch(() => {
+    throw new Error("This file is not an image that can be read.");
+  });
+  const side = Math.min(bitmap.width, bitmap.height);
+  const canvas = el("canvas");
+  canvas.width = canvas.height = Math.min(ICON_SIZE, side);
+  canvas.getContext("2d").drawImage(bitmap,
+    (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side,
+    0, 0, canvas.width, canvas.height);
+  bitmap.close();
+  const webp = canvas.toDataURL("image/webp", 0.9);
+  return webp.startsWith("data:image/webp") ? webp : canvas.toDataURL("image/png");
+}
+
+/** Picks, scales and uploads an image with `upload(dataUrl)`. */
+async function chooseAndUpload(upload) {
+  const file = await pickImage();
+  if (file) await upload(await scaleImage(file));
+}
+
+/** Preview plus "Choose…" and "Remove" buttons for an icon at `path`. */
+function iconPicker(iconId, fallback, path, label) {
+  const set = async (image) => {
+    if (await run(() => api("PUT", path, { image }))) settingsChanged(image ? `${label} saved` : `${label} removed`);
+  };
+  return el("span", { class: "icon-picker" },
+    iconId ? imageEl(iconId, { class: "icon-preview" }) : el("span", { class: "icon-preview", textContent: fallback }),
+    el("button", { type: "button", class: "small", textContent: "Choose…", onclick: () => run(() => chooseAndUpload(set)) }),
+    iconId ? el("button", { type: "button", class: "small", textContent: "Remove", onclick: () => set(null) }) : null);
+}
+
+function renderMe() {
+  const account = state.account;
+  $("me").replaceChildren(...(account
+    ? [avatar(account.user), el("span", { class: "ellipsis", textContent: `${account.user.display_name || account.user.name} @ ${new URL(account.server).host}` })]
+    : ["Developer mode"]));
+}
+
+/** A user changed their name or avatar (possibly we, in another session). */
+function onUserUpdated(user) {
+  const profile = { display_name: user.display_name, avatar_id: user.avatar_id };
+  if (user.id === myId()) {
+    Object.assign(state.account.user, profile);
+    renderMe();
+  }
+  const member = state.members.get(user.id);
+  if (member) Object.assign(member, profile);
+  for (const dm of state.dms) if (dm.user.id === user.id) Object.assign(dm.user, profile);
+  renderTree();
+  for (const m of state.messages) {
+    if (m.author_id === user.id) {
+      m.author_name = user.display_name;
+      replaceMessage(m);
+    }
+  }
 }
 
 $("group-add").addEventListener("click", async () => {
@@ -504,6 +620,7 @@ function memberNodes() {
     el("div", { class: "category" }, el("span", { textContent: `Members — ${online} online` })),
     ...members.map((m) => el("div", { class: `member${m.online ? "" : " offline"}`, title: `@${m.name}` },
       el("span", { class: `dot${m.online ? " online" : ""}` }),
+      avatar(m),
       el("span", { class: "who-name", textContent: m.user_id === myId() ? `${m.display_name || m.name} (you)` : m.display_name || m.name }),
       m.user_id === myId() ? null : el("button", {
         type: "button", class: "small", textContent: "Message",
@@ -537,6 +654,7 @@ function renderDmList() {
     onclick: () => openDm(dm),
   },
   el("span", { class: `dot${dm.user.online ? " online" : ""}` }),
+  avatar(dm.user),
   el("span", { class: "who-name", textContent: dmName(dm) }),
   dm.unread_count ? el("span", { class: "mention-badge", textContent: String(dm.unread_count) }) : null));
   $("channel-tree").replaceChildren(...(rows.length ? rows : [
@@ -764,9 +882,8 @@ function channelNodes(ch) {
   const row = el("div", { class: classes.filter(Boolean).join(" ") },
     el("button", {
       type: "button", class: "name", title: ch.name,
-      textContent: `# ${ch.name}${ch.temporary ? " ⏱" : ""}`,
       onclick: () => openChannel(ch),
-    }),
+    }, channelIcon(ch), el("span", { class: "ellipsis", textContent: `${ch.name}${ch.temporary ? " ⏱" : ""}` })),
     ch.mention_count ? el("span", { class: "mention-badge", textContent: String(ch.mention_count) }) : null,
     canJoin ? el("button", {
       type: "button", class: "join", title: "Join voice", textContent: "🔊",
@@ -783,6 +900,7 @@ function channelNodes(ch) {
       onclick: moderate ? () => moderateVoice(ch, v.user_id) : null,
     },
     el("span", { class: "dot" }),
+    avatar(m),
     el("span", { textContent: memberName(v.user_id) }));
   })) : null;
   return [row, list].filter(Boolean);
@@ -918,12 +1036,15 @@ function renderMessage(m) {
   const mine = m.author_id === myId();
   const mentionsMe = (m.mentions || []).includes(myId());
   const canDelete = mine || can(state.channel?.permissions, "MANAGE_MESSAGES");
+  const author = userInfo(m.author_id) || { name: m.author_name || "?" };
   const node = el("div", { class: `message${mentionsMe ? " mentions-me" : ""}`, dataset: { id: m.id } },
-    el("div", { class: "meta" },
-      el("strong", { textContent: m.author_name || "deleted user" }),
-      el("span", { textContent: formatTime(m.created_at) + (m.edited_at ? " (edited)" : "") })),
-    m.content ? el("div", { class: "text", textContent: m.content }) : null,
-    ...(m.attachments || []).map(renderAttachment));
+    avatar(author, "medium"),
+    el("div", { class: "body" },
+      el("div", { class: "meta" },
+        el("strong", { textContent: author.display_name || m.author_name || "deleted user" }),
+        el("span", { textContent: formatTime(m.created_at) + (m.edited_at ? " (edited)" : "") })),
+      m.content ? el("div", { class: "text", textContent: m.content }) : null,
+      ...(m.attachments || []).map(renderAttachment)));
   if (mine || canDelete) {
     node.append(el("span", { class: "actions" },
       mine ? el("button", { type: "button", class: "small", textContent: "Edit", onclick: () => editMessage(m, node) }) : null,
@@ -1100,7 +1221,46 @@ $("message-input").addEventListener("keydown", (ev) => {
   }
 });
 
-$("change-password").addEventListener("click", async () => {
+$("profile").addEventListener("click", async () => {
+  const user = state.account.user;
+  const preview = el("span", {}, avatar(user, "large"));
+  const removeButton = el("button", { type: "button", class: "small", textContent: "Remove", hidden: !user.avatar_id });
+  const setAvatar = async (image) => {
+    const updated = await api("PUT", "/users/me/avatar", { image });
+    onUserUpdated(updated);
+    preview.replaceChildren(avatar(updated, "large"));
+    removeButton.hidden = !updated.avatar_id;
+  };
+  removeButton.onclick = () => run(() => setAvatar(null));
+  let wantsPassword = false;
+  const done = await ask({
+    title: "Your profile",
+    text: el("div", {},
+      el("div", { class: "row profile-avatar" },
+        preview,
+        el("button", { type: "button", class: "small", textContent: "Choose picture…", onclick: () => run(() => chooseAndUpload(setAvatar)) }),
+        removeButton),
+      el("p", { class: "muted", textContent: `User name: @${user.name} (cannot be changed)` }),
+      el("button", {
+        type: "button", class: "small", textContent: "Change password…",
+        onclick: () => {
+          wantsPassword = true;
+          $("dialog-cancel").click();
+        },
+      })),
+    fields: [{ id: "display_name", label: "Display name", value: user.display_name }],
+    ok: "Save",
+    submit: (v) => {
+      if (!v.display_name) return "Enter a display name.";
+      if (v.display_name === state.account.user.display_name) return null;
+      return tryText(async () => onUserUpdated(await api("PATCH", "/users/me", { display_name: v.display_name })));
+    },
+  });
+  if (done) setStatus("Profile saved");
+  if (wantsPassword) changePassword();
+});
+
+async function changePassword() {
   const done = await ask({
     title: "Change password",
     fields: [
@@ -1116,7 +1276,7 @@ $("change-password").addEventListener("click", async () => {
     },
   });
   if (done) setStatus("Password changed; your other sessions were signed out");
-});
+}
 
 $("composer").addEventListener("submit", async (ev) => {
   ev.preventDefault();
@@ -1287,6 +1447,8 @@ function settingsOverview() {
     const name = el("input", { value: g.name, maxLength: 64 });
     const limit = el("input", { type: "number", min: 0, max: 50, value: g.user_channel_limit ?? 0 });
     parts.push(section("Group",
+      // Not a <label>: clicking the caption would open the file picker.
+      el("div", { class: "icon-field" }, "Icon", iconPicker(g.icon_id, initials(g.name), `/groups/${g.id}/icon`, "Group icon")),
       el("label", {}, "Name", name),
       el("label", {}, "Own rooms per member (0–50)", limit),
       saveButton("Save", async () => {
@@ -1470,11 +1632,19 @@ function settingsChannels() {
     const position = el("input", { type: "number", class: "pos", value: ch.position });
     const voice = el("input", { type: "checkbox", checked: ch.voice_enabled });
     const category = el("select", {}, ...categoryOptions(ch.category_id));
+    const emoji = el("input", {
+      value: ch.emoji || "", maxLength: 8, class: "emoji", placeholder: "#",
+      title: "Emoji shown before the name (used when there is no icon image)",
+    });
     const row = el("div", { class: "channel-row" },
-      name, el("label", { class: "inline" }, "Pos ", position), category,
+      iconPicker(ch.icon_id, ch.emoji || "#", `/channels/${ch.id}/icon`, "Channel icon"),
+      emoji, name, el("label", { class: "inline" }, "Pos ", position), category,
       el("label", { class: "inline" }, voice, " Voice"),
       saveButton("Save", async () => {
-        const body = { name: name.value.trim(), position: Number(position.value), voice_enabled: voice.checked, category_id: category.value || null };
+        const body = {
+          name: name.value.trim(), position: Number(position.value), voice_enabled: voice.checked,
+          category_id: category.value || null, emoji: emoji.value.trim() || null,
+        };
         if (await run(() => api("PATCH", `/channels/${ch.id}`, body))) settingsChanged(`#${body.name} saved`);
       }),
       el("button", {
@@ -1671,6 +1841,9 @@ listen("gateway", (ev) => {
       renderTree();
       break;
     }
+    case "user_updated":
+      onUserUpdated(e.data);
+      break;
     case "typing":
       if (e.channel_id === state.channel?.id && e.user_id !== myId()) {
         typingUsers.set(e.user_id, { name: displayNameOf(e.user_id, e.data.name), until: Date.now() + 5000 });

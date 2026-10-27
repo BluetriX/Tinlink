@@ -230,10 +230,10 @@ impl Backend {
         Ok(check(resp).await?.json().await?)
     }
 
-    /// Fetches a signed attachment URL (relative to the server).
+    /// Fetches a signed attachment URL or an avatar/icon (relative to the server).
     pub async fn fetch(&self, url: &str) -> Result<(String, Vec<u8>)> {
-        if !url.starts_with("/api/files/") {
-            bail!("not an attachment URL");
+        if !url.starts_with("/api/files/") && !url.starts_with("/api/images/") {
+            bail!("not an attachment or image URL");
         }
         let resp = self
             .client

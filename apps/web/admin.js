@@ -139,7 +139,9 @@ export function createSettings(ctx) {
     const name = el("input", { value: g.name, maxLength: 64 });
     const limit = el("input", { type: "number", min: 0, max: 50, value: String(g.user_channel_limit) });
     const parts = [section("Group",
-      field("Icon", iconPicker(g.icon_id, initials(g.name), `/groups/${g.id}/icon`, "Group icon")),
+      // Not a <label>: clicking the caption would open the file picker.
+      el("div", { class: "field" }, el("span", { textContent: "Icon" }),
+        iconPicker(g.icon_id, initials(g.name), `/groups/${g.id}/icon`, "Group icon")),
       field("Name", name),
       field("Own channels per member", limit),
       el("p", { class: "hint", textContent: "How many channels a member may create in categories that allow it." }),
