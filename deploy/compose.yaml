@@ -4,7 +4,9 @@ name: tinlink
 
 services:
   caddy:
-    image: caddy:2.11
+    # Caddy with the layer4 plugin, which shares port 443 with TURN.
+    build: ./caddy
+    image: tinlink-caddy
     restart: unless-stopped
     ports:
       - "80:80"
@@ -12,6 +14,7 @@ services:
       - "443:443/udp"
     environment:
       TINLINK_DOMAIN: ${TINLINK_DOMAIN}
+      TINLINK_TURN_DOMAIN: ${TINLINK_TURN_DOMAIN:-turn.localhost}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
@@ -57,7 +60,8 @@ services:
       retries: 10
 
   livekit:
-    image: livekit/livekit-server:v1.13
+    # v1.13.8 or newer: turn.proxy_protocol in livekit.yaml.
+    image: livekit/livekit-server:v1.13.11
     restart: unless-stopped
     command: ["--config", "/etc/livekit.yaml"]
     environment:
@@ -65,6 +69,7 @@ services:
       LIVEKIT_WEBHOOK_API_KEY: ${LIVEKIT_API_KEY}
       # IP announced to clients for media; empty means auto-detect.
       NODE_IP: ${LIVEKIT_NODE_IP:-}
+      LIVEKIT_TURN_DOMAIN: ${TINLINK_TURN_DOMAIN:-turn.localhost}
     volumes:
       - ./livekit.yaml:/etc/livekit.yaml:ro
     ports:
@@ -73,6 +78,8 @@ services:
       # Media must reach LiveKit directly, never through the reverse proxy.
       - "7881:7881/tcp"
       - "50000-50100:50000-50100/udp"
+      # TURN over UDP (optional); TURN over TLS comes in through Caddy on 443.
+      - "3478:3478/udp"
 
 volumes:
   caddy_data:

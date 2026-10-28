@@ -1,10 +1,33 @@
 # TLS certificates are obtained automatically from Let's Encrypt (ports 80
 # and 443 must be reachable). For "localhost" Caddy uses its own local CA.
 
+{
+	servers :443 {
+		listener_wrappers {
+			# TURN over TLS shares port 443 with HTTPS, so voice also works
+			# behind firewalls that only allow outgoing HTTPS. Connections for
+			# the TURN name (TLS SNI) are decrypted here and passed to LiveKit,
+			# with a PROXY header that carries the client address; everything
+			# else continues to the HTTP server below.
+			layer4 {
+				@turn tls sni {$TINLINK_TURN_DOMAIN:turn.localhost}
+				route @turn {
+					tls
+					proxy {
+						proxy_protocol v2
+						upstream livekit:5349
+					}
+				}
+			}
+			tls
+		}
+	}
+}
+
 {$TINLINK_DOMAIN} {
 	encode zstd gzip
 	# LiveKit signaling (WebSocket), so one domain and certificate suffice.
-	# Media itself uses UDP 50000-50100 and TCP 7881 directly.
+	# Media uses UDP 50000-50100, TCP 7881 or TURN on the name below.
 	handle /rtc* {
 		reverse_proxy livekit:7880
 	}
@@ -12,4 +35,10 @@
 	handle {
 		reverse_proxy server:8080
 	}
+}
+
+# Only here so that Caddy obtains a certificate for the TURN name; TURN
+# connections are taken over by the listener wrapper above.
+{$TINLINK_TURN_DOMAIN:turn.localhost} {
+	respond 404
 }
