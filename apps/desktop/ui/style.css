@@ -861,15 +861,34 @@ mark {
   font-weight: 600;
 }
 
-#voice-settings {
+#voice-settings,
+#sound-settings {
   margin-top: 6px;
   font-size: 13px;
 }
 
-#voice-settings summary {
+#voice-settings summary,
+#sound-settings summary {
   cursor: pointer;
   color: var(--muted);
   margin-bottom: 6px;
+}
+
+.sound-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+
+.sound-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.sound-list.disabled label {
+  opacity: 0.5;
 }
 
 /* Chat */

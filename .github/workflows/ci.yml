@@ -20,6 +20,9 @@ jobs:
       - run: cd apps/web/vendor && sha256sum -c SHA256SUMS
       - run: node --check apps/web/app.js && node --check apps/web/admin.js && node --check apps/web/e2ee.js && node --check apps/web/keyring.js && node --check apps/web/level-worklet.js
       - run: node --test apps/web/tests/*.test.js
+      # Sounds are synthesized by a script; both clients share sounds.js.
+      - run: cmp apps/web/sounds.js apps/desktop/ui/sounds.js
+      - run: python3 tools/sounds/generate.py --check
 
   rust:
     runs-on: ubuntu-latest

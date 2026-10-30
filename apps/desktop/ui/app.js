@@ -2,6 +2,8 @@
 // this page renders state and sends commands. No framework, no build step.
 "use strict";
 
+import { createSounds } from "./sounds.js";
+
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 
@@ -59,6 +61,8 @@ const settings = {
     }
   },
 };
+
+const sounds = createSounds({ load: () => settings.load(), save: (patch) => settings.save(patch) });
 
 /** Permission sets arrive as "VIEW_CHANNEL | SEND_MESSAGES". */
 function can(perms, flag) {
@@ -210,7 +214,6 @@ $("dev-form").addEventListener("submit", async (ev) => {
     room,
   }));
   if (ok) {
-    unlockAudio();
     await showMain(null);
     voiceJoined({ id: room, name: room, dev: true });
   }
@@ -506,6 +509,7 @@ function trackNewMessage(e) {
     const where = ch ? `#${ch.name}` : state.groups.find((x) => x.id === e.group_id)?.name || "Tinlink";
     const body = m.content || (m.attachments?.length ? "sent a file" : "");
     invoke("notify", { title: `${m.author_name || "Someone"} mentioned you in ${where}`, body: body.slice(0, 200) });
+    sounds.play("message");
   }
 }
 
@@ -858,6 +862,7 @@ async function trackDmMessage(m) {
   if (!mine && !seen) {
     const body = m.content || (m.attachments?.length ? "sent a file" : "");
     invoke("notify", { title: `Message from ${m.author_name || "someone"}`, body: body.slice(0, 200) });
+    sounds.play("message");
   }
 }
 
@@ -2018,18 +2023,23 @@ listen("gateway", (ev) => {
         state.voice.push({ channel_id: e.channel_id, user_id: e.data.user_id });
         renderTree();
       }
+      if (inMyVoiceChannel(e)) sounds.play("user-joined");
       break;
     case "voice_left":
       if (inGroup) {
         state.voice = state.voice.filter((v) => !(v.channel_id === e.channel_id && v.user_id === e.data.user_id));
         renderTree();
       }
+      if (inMyVoiceChannel(e)) sounds.play("user-left");
       break;
     case "voice_moved":
       // A moderator moved us: the server disconnected us, join the target.
       if (e.user_id === state.account?.user.id) {
         const target = state.channels.find((c) => c.id === e.data.to);
-        if (target) joinVoice(target);
+        if (target) {
+          movedAt = Date.now();
+          joinVoice(target, { sound: "moved" });
+        }
       }
       break;
     case "group_deleted":
@@ -2061,6 +2071,11 @@ listen("gateway", (ev) => {
   }
 });
 
+/** Someone else's voice event in the channel we are talking in. */
+function inMyVoiceChannel(e) {
+  return e.channel_id === state.voiceChannel?.id && e.data.user_id !== myId();
+}
+
 listen("gateway-status", (ev) => {
   $("gateway-dot").classList.toggle("online", ev.payload.connected);
   $("gateway-dot").title = ev.payload.connected ? "Live updates connected" : "Reconnecting…";
@@ -2068,39 +2083,12 @@ listen("gateway-status", (ev) => {
 
 // ------------------------------------------------------------------ voice
 
-// Created on a click (join), so the WebView's autoplay policy allows it.
-let audioContext = null;
-function unlockAudio() {
-  try {
-    audioContext ??= new AudioContext();
-    audioContext.resume();
-  } catch {
-    // no beeps then
-  }
-}
-
-/** Two short, quiet tones: "you are talking, but nobody hears you". */
-function playMutedBeep() {
-  if (!audioContext) return;
-  const t = audioContext.currentTime;
-  for (const [offset, freq] of [[0, 880], [0.18, 660]]) {
-    const osc = audioContext.createOscillator();
-    const gain = audioContext.createGain();
-    osc.frequency.value = freq;
-    gain.gain.setValueAtTime(0, t + offset);
-    gain.gain.linearRampToValueAtTime(0.08, t + offset + 0.02);
-    gain.gain.linearRampToValueAtTime(0, t + offset + 0.14);
-    osc.connect(gain).connect(audioContext.destination);
-    osc.start(t + offset);
-    osc.stop(t + offset + 0.15);
-  }
-}
-
+let mutedHintTimer = null;
 listen("muted-speech", () => {
-  playMutedBeep();
+  sounds.play("talking-muted");
   $("muted-hint").hidden = false;
-  clearTimeout(playMutedBeep.timer);
-  playMutedBeep.timer = setTimeout(() => { $("muted-hint").hidden = true; }, 6000);
+  clearTimeout(mutedHintTimer);
+  mutedHintTimer = setTimeout(() => { $("muted-hint").hidden = true; }, 6000);
 });
 
 /** Whether the running call uses channel keys (and needs newer ones). */
@@ -2122,9 +2110,11 @@ async function mediaKeysOf(channelId) {
   return out;
 }
 
-/** Joins a channel's voice; returns whether it worked. */
-async function joinVoice(ch, { quiet = false } = {}) {
-  unlockAudio();
+/**
+ * Joins a channel's voice; returns whether it worked. `sound` is played on
+ * success ("moved" when a moderator moved us).
+ */
+async function joinVoice(ch, { quiet = false, sound = "connected" } = {}) {
   if (!quiet) setStatus(`Joining ${ch.name}…`);
   let info;
   try {
@@ -2138,6 +2128,7 @@ async function joinVoice(ch, { quiet = false } = {}) {
   cancelRejoin();
   setStatus(`Connected to voice in ${ch.name}`);
   voiceJoined(ch);
+  sounds.play(sound);
   // Rejoined automatically after a connection loss or app restart.
   settings.save({ lastVoice: { groupId: ch.group_id, channelId: ch.id } });
   return !!info;
@@ -2161,9 +2152,6 @@ async function rejoinLastVoice() {
     settings.save({ lastVoice: null });
   }
 }
-
-// The beep needs an audio context, which the WebView only allows after a click.
-document.addEventListener("pointerdown", () => unlockAudio(), { once: true });
 
 function voiceJoined(ch) {
   state.voiceChannel = ch;
@@ -2195,6 +2183,7 @@ $("voice-leave").addEventListener("click", async () => {
   settings.save({ lastVoice: null });
   await run(() => invoke("leave"));
   voiceLeft();
+  sounds.play("disconnected");
 });
 
 function shareSettings() {
@@ -2457,14 +2446,29 @@ listen("disconnected", (ev) => {
   const ch = state.voiceChannel;
   voiceLeft();
   if (rejoin && ch && !ch.dev) {
+    sounds.play("connection-lost");
     recoverVoice(ch);
   } else {
     // Removed by a moderator, room deleted, ...: do not come back by itself.
     // (A move is followed by voice_moved, which joins the new channel.)
     settings.save({ lastVoice: null });
     setStatus(`Voice disconnected (${reason})`, true);
+    if (reason !== "ClientInitiated") playRemovedUnlessMoved();
   }
 });
+
+/**
+ * A move also disconnects us first; voice_moved may arrive just before or
+ * just after. Only a removal that is not followed by a move gets its sound.
+ */
+let movedAt = 0;
+function playRemovedUnlessMoved() {
+  const at = Date.now();
+  if (at - movedAt < 1500) return;
+  setTimeout(() => {
+    if (movedAt < at) sounds.play("removed");
+  }, 1000);
+}
 
 listen("voice-reconnecting", () => {
   if (state.voiceChannel) $("voice-status").textContent = `Voice: # ${state.voiceChannel.name} (reconnecting…)`;
@@ -2628,6 +2632,7 @@ async function init() {
     $("low-latency-hint").hidden = lowLatencyPlayback === early.lowLatencyPlayback;
   });
   if (saved.cameraQuality) $("camera-quality").value = saved.cameraQuality;
+  $("sound-settings").append(sounds.renderSettings(el));
   const threshold = saved.vaThreshold ?? -50;
   $("va-threshold").value = String(threshold);
   showThreshold(threshold);

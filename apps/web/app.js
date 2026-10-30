@@ -9,6 +9,7 @@ import { createSettings, hasSettings } from "./admin.js";
 import { avatar, chooseAndUpload, imageUrl, initials } from "./images.js";
 import { createKeyring } from "./keyring.js";
 import { mediaKey, mediaKeyIndex, toBase64 } from "./e2ee.js";
+import { createSounds } from "./sounds.js";
 
 const LK = window.LivekitClient;
 
@@ -70,6 +71,8 @@ const settings = {
   load: () => store.get("tinlink.settings") || {},
   save: (patch) => store.set("tinlink.settings", { ...settings.load(), ...patch }),
 };
+
+const sounds = createSounds({ load: () => settings.load(), save: (patch) => settings.save(patch) });
 
 const state = {
   session: null, // { token, user }
@@ -1151,7 +1154,10 @@ function onMessageCreated(e) {
     addMessage(m);
     markRead();
   }
-  if (mentioned && !mine && !(open && watching())) notifyMention(m);
+  if (mentioned && !mine && !(open && watching())) {
+    notifyMention(m);
+    sounds.play("message");
+  }
 }
 
 // --------------------------------------------------------- direct messages
@@ -1256,7 +1262,10 @@ function onDirectMessage(m, mine, open) {
     addMessage(m);
     markRead();
   }
-  if (!mine && !(open && watching())) notifyMention(m);
+  if (!mine && !(open && watching())) {
+    notifyMention(m);
+    sounds.play("message");
+  }
 }
 
 function onPresence(userId, online, inGroup) {
@@ -1397,18 +1406,23 @@ function onGatewayEvent(e) {
         state.voice.push({ channel_id: e.channel_id, user_id: e.data.user_id });
         renderTree();
       }
+      if (inMyVoiceChannel(e)) sounds.play("user-joined");
       break;
     case "voice_left":
       if (inGroup) {
         state.voice = state.voice.filter((v) => !(v.channel_id === e.channel_id && v.user_id === e.data.user_id));
         renderTree();
       }
+      if (inMyVoiceChannel(e)) sounds.play("user-left");
       break;
     case "voice_moved":
       // A moderator moved us: the server disconnected us, join the target.
       if (e.user_id === state.session?.user.id) {
         const target = state.channels.find((c) => c.id === e.data.to);
-        if (target) joinVoice(target);
+        if (target) {
+          movedAt = Date.now();
+          joinVoice(target, { sound: "moved" });
+        }
       }
       break;
     case "group_deleted":
@@ -1621,7 +1635,7 @@ function unlockAudio() {
     }
     audioContext.resume();
   } catch {
-    // no level meter and no beeps then
+    // no level meter then
   }
 }
 document.addEventListener("pointerdown", () => {
@@ -1654,23 +1668,6 @@ function applyTransmit() {
   $("tx").classList.toggle("on", on);
 }
 
-/** Two short, quiet tones: "you are talking, but nobody hears you". */
-function playMutedBeep() {
-  if (!audioContext) return;
-  const t = audioContext.currentTime;
-  for (const [offset, freq] of [[0, 880], [0.18, 660]]) {
-    const osc = audioContext.createOscillator();
-    const gain = audioContext.createGain();
-    osc.frequency.value = freq;
-    gain.gain.setValueAtTime(0, t + offset);
-    gain.gain.linearRampToValueAtTime(0.08, t + offset + 0.02);
-    gain.gain.linearRampToValueAtTime(0, t + offset + 0.14);
-    osc.connect(gain).connect(audioContext.destination);
-    osc.start(t + offset);
-    osc.stop(t + offset + 0.15);
-  }
-}
-
 /** One microphone level sample from the worklet. */
 function onLevel(db) {
   const now = performance.now();
@@ -1680,7 +1677,7 @@ function onLevel(db) {
   const speaking = db >= voice.gate.thresholdDb;
   const serverMuted = !voice.room?.localParticipant.permissions?.canPublish;
   if (voice.detector.update(speaking, transmitting() && !serverMuted, now)) {
-    playMutedBeep();
+    sounds.play("talking-muted");
     $("muted-hint").hidden = false;
     clearTimeout(onLevel.hintTimer);
     onLevel.hintTimer = setTimeout(() => { $("muted-hint").hidden = true; }, 6000);
@@ -1804,7 +1801,7 @@ async function mediaEncryption(ch, saved) {
 let e2eeWorker = null;
 
 /** Joins a channel's voice; returns whether it worked. */
-async function joinVoice(ch, { quiet = false } = {}) {
+async function joinVoice(ch, { quiet = false, sound = "connected" } = {}) {
   unlockAudio();
   if (!quiet) setStatus(`Joining ${ch.name}…`);
   try {
@@ -1838,6 +1835,7 @@ async function joinVoice(ch, { quiet = false } = {}) {
   cancelRejoin();
   setStatus(`Connected to voice in ${ch.name}`);
   voiceJoinedUi(ch);
+  sounds.play(sound);
   settings.save({ lastVoice: { groupId: ch.group_id, channelId: ch.id } });
   renderParticipants();
   return true;
@@ -1941,6 +1939,7 @@ function wireRoom(room) {
       const R = LK.DisconnectReason;
       const final = [R.CLIENT_INITIATED, R.PARTICIPANT_REMOVED, R.ROOM_DELETED, R.DUPLICATE_IDENTITY].includes(reason);
       if (!final && ch) {
+        sounds.play("connection-lost");
         scheduleRejoin(ch, 0);
       } else {
         // Removed by a moderator, room deleted, ...: do not come back by itself.
@@ -1948,9 +1947,28 @@ function wireRoom(room) {
         if (reason !== R.CLIENT_INITIATED) {
           settings.save({ lastVoice: null });
           setStatus("Voice disconnected", true);
+          playRemovedUnlessMoved();
         }
       }
     });
+}
+
+/** Someone else's voice event in the channel we are talking in. */
+function inMyVoiceChannel(e) {
+  return e.channel_id === voice.channel?.id && e.data.user_id !== state.session?.user.id;
+}
+
+/**
+ * A move also disconnects us first; voice_moved may arrive just before or
+ * just after. Only a removal that is not followed by a move gets its sound.
+ */
+let movedAt = 0;
+function playRemovedUnlessMoved() {
+  const at = Date.now();
+  if (at - movedAt < 1500) return;
+  setTimeout(() => {
+    if (movedAt < at) sounds.play("removed");
+  }, 1000);
 }
 
 $("audio-start").addEventListener("click", async () => {
@@ -2003,7 +2021,9 @@ async function leaveVoice({ keepRejoin = false } = {}) {
 
 $("voice-leave").addEventListener("click", async () => {
   settings.save({ lastVoice: null });
+  const wasIn = !!voice.room;
   await leaveVoice();
+  if (wasIn) sounds.play("disconnected");
 });
 
 /** After loading: back into the voice channel the page was closed in. */
@@ -2511,6 +2531,7 @@ $("output-device").addEventListener("change", async () => {
   const id = $("output-device").value;
   settings.save({ outputDevice: id });
   applyOutputToContext(id);
+  sounds.setSink(id);
   await run(() => voice.room?.switchActiveDevice("audiooutput", id || "default"));
 });
 
@@ -2543,6 +2564,8 @@ async function init() {
   if (saved.shareResolution) $("share-resolution").value = saved.shareResolution;
   if (saved.shareFps) $("share-fps").value = saved.shareFps;
   if (saved.cameraQuality) $("camera-quality").value = saved.cameraQuality;
+  sounds.setSink(saved.outputDevice);
+  $("sound-settings").append(sounds.renderSettings(el));
   $("camera-quality").addEventListener("change", () => settings.save({ cameraQuality: $("camera-quality").value }));
   $("share-resolution").addEventListener("change", () => settings.save({ shareResolution: $("share-resolution").value }));
   $("share-fps").addEventListener("change", () => settings.save({ shareFps: $("share-fps").value }));
