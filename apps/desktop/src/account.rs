@@ -191,6 +191,43 @@ pub async fn download(
     Ok(path.display().to_string())
 }
 
+/// Returns an attachment's raw bytes; the UI decrypts encrypted ones.
+#[tauri::command]
+pub async fn fetch_file(
+    state: State<'_, AppState>,
+    url: String,
+) -> CmdResult<tauri::ipc::Response> {
+    let (_, data) = {
+        let guard = state.backend.lock().await;
+        let backend = guard.as_ref().ok_or("not logged in")?;
+        backend.fetch(&url).await.map_err(chain)?
+    };
+    Ok(tauri::ipc::Response::new(data))
+}
+
+/// Saves bytes from the UI (a decrypted attachment) into the Downloads
+/// folder and returns the path.
+#[tauri::command]
+pub async fn save_file(app: AppHandle, request: tauri::ipc::Request<'_>) -> CmdResult<String> {
+    let tauri::ipc::InvokeBody::Raw(data) = request.body() else {
+        return Err("expected raw file data".into());
+    };
+    let filename = request
+        .headers()
+        .get("x-filename")
+        .and_then(|v| v.to_str().ok())
+        .map(|f| {
+            percent_encoding::percent_decode_str(f)
+                .decode_utf8_lossy()
+                .into_owned()
+        })
+        .unwrap_or_else(|| "download".into());
+    let dir = app.path().download_dir().map_err(err)?;
+    let path = unique_path(&dir, &filename);
+    std::fs::write(&path, data).map_err(err)?;
+    Ok(path.display().to_string())
+}
+
 /// Returns an image attachment as a data URL for inline display.
 #[tauri::command]
 pub async fn image_data(state: State<'_, AppState>, url: String) -> CmdResult<String> {

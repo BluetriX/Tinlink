@@ -5,7 +5,8 @@ devices, the recovery key and channel keys, and can encrypt voice, webcams
 and screen shares with channel keys (opt-in in the voice settings for now).
 Both clients encrypt every new message. The desktop UI runs the web
 client's `e2ee.js`, `keyring.js` and `logic.js` (copied by its build script)
-and hands only the derived media keys to the Rust core. Files are not encrypted yet.
+and hands only the derived media keys to the Rust core. Attachments are
+encrypted with a key per file that travels in the message.
 
 The server stores public keys and wrapped channel keys and decides who may
 fetch them. It never sees a private key, a channel key, a message or a media
@@ -124,6 +125,23 @@ A reader accepts a message only if the device belongs to the message's
 author and carries a valid certificate. Edits are new envelopes; older
 messages without `encrypted` stay plain text. Mentions are sent as
 `mentions: [user_id]` next to the envelope.
+
+### Attachments
+
+Each file gets its own random 32-byte key. The server receives only
+
+```
+file = nonce(12) || AES-256-GCM(file_key, nonce, bytes, aad = "tinlink-file-v1")
+```
+
+uploaded under the name `encrypted` as `application/octet-stream`. Name,
+type, size and key go into the message plaintext:
+
+```
+{"text": "...", "files": [{"id": attachment_id, "name": "...", "type": "image/png", "size": 1234, "key": base64(file_key)}]}
+```
+
+An edit carries the same `files` again.
 
 ## Server API
 

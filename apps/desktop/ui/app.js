@@ -335,12 +335,17 @@ async function approvePendingDevices({ explicit = false } = {}) {
  * The post fields of a message: encrypted with the channel key and with the
  * mentioned users named, since the server cannot read them.
  */
-async function outgoing(channelId, content) {
+function requireApproval() {
   if (!state.keyring?.approved) throw new Error("Approve this device for encryption first (click your name).");
+}
+
+async function outgoing(channelId, content, files = []) {
+  requireApproval();
   const names = mentionedNames(content);
   const users = [...state.members.values(), ...state.dms.map((d) => d.user)];
   const mentions = [...new Set(users.filter((u) => names.includes(u.name?.toLowerCase())).map((u) => u.id ?? u.user_id))];
-  return { ...(await state.keyring.encrypt(channelId, { text: content })), mentions };
+  const body = files?.length ? { text: content, files } : { text: content };
+  return { ...(await state.keyring.encrypt(channelId, body)), mentions };
 }
 
 /** Decrypts an encrypted message in place; marks it locked without a key. */
@@ -351,6 +356,7 @@ async function openMessage(m) {
     if (!state.keyring) throw new Error("no keys");
     const body = await state.keyring.decrypt(m.channel_id, m.author_id, m.envelope);
     m.content = typeof body.text === "string" ? body.text : "";
+    applyFiles(m, body.files);
     m.opened = true;
     m.locked = false;
   } catch {
@@ -358,6 +364,20 @@ async function openMessage(m) {
     m.locked = true;
   }
   return m;
+}
+
+/** Puts the names, types and keys from an encrypted message on its attachments. */
+function applyFiles(m, files) {
+  if (!Array.isArray(files)) return;
+  m.files = files.filter((f) => f && typeof f.id === "string" && typeof f.key === "string");
+  for (const a of m.attachments || []) {
+    const f = m.files.find((x) => x.id === a.id);
+    if (!f) continue;
+    a.filename = String(f.name || "file");
+    a.content_type = String(f.type || "application/octet-stream");
+    a.size_bytes = Number(f.size) || a.size_bytes;
+    a.key = f.key;
+  }
 }
 
 /** Tries locked messages of the open channel again, e.g. after keys arrived. */
@@ -1269,7 +1289,7 @@ function editMessage(m, node) {
     const content = box.value.trim();
     if (!content || content === m.content) return replaceMessage(m);
     const updated = await run(async () => openMessage(
-      await api("PATCH", `/channels/${m.channel_id}/messages/${m.id}`, await outgoing(m.channel_id, content))));
+      await api("PATCH", `/channels/${m.channel_id}/messages/${m.id}`, await outgoing(m.channel_id, content, m.files))));
     if (updated) replaceMessage(updated);
   };
   box.addEventListener("keydown", (ev) => {
@@ -1302,6 +1322,7 @@ async function deleteMessage(m) {
 }
 
 function renderAttachment(a) {
+  if (a.key) return renderEncryptedAttachment(a);
   const download = () => run(async () => {
     const path = await invoke("download", { url: a.url, filename: a.filename });
     setStatus(`Saved to ${path}`);
@@ -1311,6 +1332,38 @@ function renderAttachment(a) {
     invoke("image_data", { url: a.url }).then((src) => { img.src = src; }).catch(() => {
       img.replaceWith(fileButton(a, download));
     });
+    return el("div", { class: "attachment" }, img);
+  }
+  return el("div", { class: "attachment" }, fileButton(a, download));
+}
+
+/** Decrypted bytes of encrypted attachments, by attachment id. */
+const fileData = new Map();
+
+function decryptedFile(a) {
+  if (!fileData.has(a.id)) {
+    const data = (async () => {
+      const raw = await invoke("fetch_file", { url: a.url });
+      return e2ee.openFile(a.key, new Uint8Array(raw));
+    })();
+    data.catch(() => fileData.delete(a.id));
+    fileData.set(a.id, data);
+  }
+  return fileData.get(a.id);
+}
+
+function renderEncryptedAttachment(a) {
+  const download = () => run(async () => {
+    const path = await invoke("save_file", await decryptedFile(a), {
+      headers: { "x-filename": encodeURIComponent(a.filename) },
+    });
+    setStatus(`Saved to ${path}`);
+  });
+  if (a.content_type.startsWith("image/") && a.size_bytes <= 16 * 1024 * 1024) {
+    const img = el("img", { alt: a.filename, title: `${a.filename} – click to save`, onclick: download });
+    decryptedFile(a).then((data) => {
+      img.src = URL.createObjectURL(new Blob([data], { type: a.content_type }));
+    }).catch(() => img.replaceWith(fileButton(a, download)));
     return el("div", { class: "attachment" }, img);
   }
   return el("div", { class: "attachment" }, fileButton(a, download));
@@ -1509,20 +1562,23 @@ $("composer").addEventListener("submit", async (ev) => {
   if (!ch || (!content && !state.pendingFiles.length)) return;
   $("composer").querySelector("button[type=submit]").disabled = true;
   try {
-    const ids = [];
+    requireApproval();
+    const files = [];
     for (const file of state.pendingFiles) {
       setStatus(`Uploading ${file.name}…`);
-      const data = new Uint8Array(await file.arrayBuffer());
-      const info = await invoke("upload", data, {
+      // The server gets only the encrypted bytes; name, type and key travel in the message.
+      const sealed = await e2ee.sealFile(new Uint8Array(await file.arrayBuffer()));
+      const info = await invoke("upload", sealed.data, {
         headers: {
           "x-channel-id": ch.id,
-          "x-filename": encodeURIComponent(file.name),
-          "x-content-type": file.type || "application/octet-stream",
+          "x-filename": "encrypted",
+          "x-content-type": "application/octet-stream",
         },
       });
-      ids.push(info.id);
+      files.push({ id: info.id, name: file.name, type: file.type || "application/octet-stream", size: file.size, key: sealed.key });
     }
-    const body = await outgoing(ch.id, content);
+    const ids = files.map((f) => f.id);
+    const body = await outgoing(ch.id, content, files);
     const message = await openMessage(await api("POST", `/channels/${ch.id}/messages`, { ...body, attachment_ids: ids }));
     state.pendingFiles = [];
     renderPending();

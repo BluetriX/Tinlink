@@ -510,6 +510,8 @@ fn main() {
             account::upload,
             account::download,
             account::image_data,
+            account::fetch_file,
+            account::save_file,
             account::join_voice,
             account::set_media_keys,
             account::send_typing,

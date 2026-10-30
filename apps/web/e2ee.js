@@ -328,4 +328,28 @@ export async function openMessage({ channelId, envelope, channelKey, signKey }) 
   return new Uint8Array(pt);
 }
 
+// ------------------------------------------------------------------ files
+
+const FILE_LABEL = "tinlink-file-v1";
+
+/**
+ * Encrypts a file with a fresh key; the key travels inside the encrypted
+ * message that carries the file.
+ */
+export async function sealFile(data) {
+  const fileKey = randomKey();
+  const key = await subtle.importKey("raw", fileKey, "AES-GCM", false, ["encrypt"]);
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await subtle.encrypt({ name: "AES-GCM", iv: nonce, additionalData: text(FILE_LABEL) }, key, data));
+  return { key: toBase64(fileKey), data: concat(nonce, ct) };
+}
+
+/** Decrypts a file sealed with `sealFile`; throws when it was changed. */
+export async function openFile(fileKey, data) {
+  if (data.length < 12 + 16) throw new Error("file too short");
+  const key = await subtle.importKey("raw", fromBase64(fileKey), "AES-GCM", false, ["decrypt"]);
+  const pt = await subtle.decrypt({ name: "AES-GCM", iv: data.subarray(0, 12), additionalData: text(FILE_LABEL) }, key, data.subarray(12));
+  return new Uint8Array(pt);
+}
+
 export { equal as bytesEqual };

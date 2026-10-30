@@ -8,7 +8,7 @@ import {
 import { createSettings, hasSettings } from "./admin.js";
 import { avatar, chooseAndUpload, imageUrl, initials } from "./images.js";
 import { createKeyring } from "./keyring.js";
-import { mediaKey, mediaKeyIndex, toBase64 } from "./e2ee.js";
+import { mediaKey, mediaKeyIndex, openFile, sealFile, toBase64 } from "./e2ee.js";
 import { createSounds } from "./sounds.js";
 
 const LK = window.LivekitClient;
@@ -794,7 +794,7 @@ async function editMessage(m) {
     submit: (v) => {
       if (!v.content) return "A message cannot be empty; delete it instead.";
       return tryText(async () => {
-        const body = await outgoing(m.channel_id, v.content);
+        const body = await outgoing(m.channel_id, v.content, m.files);
         replaceMessage(await openMessage(await api("PATCH", `/channels/${m.channel_id}/messages/${m.id}`, body)));
       });
     },
@@ -808,6 +808,7 @@ async function deleteMessage(m) {
 }
 
 function renderAttachment(a) {
+  if (a.key) return renderEncryptedAttachment(a);
   if (a.content_type.startsWith("image/")) {
     return el("div", { class: "attachment" },
       el("a", { href: a.url, target: "_blank", rel: "noopener", title: a.filename },
@@ -815,6 +816,37 @@ function renderAttachment(a) {
   }
   return el("div", { class: "attachment" },
     el("a", { href: a.url, download: a.filename, class: "small", textContent: `📎 ${a.filename} (${formatSize(a.size_bytes)})` }));
+}
+
+/** Decrypted object URLs of encrypted attachments, by attachment id. */
+const fileUrls = new Map();
+
+function decryptedUrl(a) {
+  if (!fileUrls.has(a.id)) {
+    const url = (async () => {
+      const resp = await fetch(a.url);
+      if (!resp.ok) throw new Error(`download failed (${resp.status})`);
+      const data = await openFile(a.key, new Uint8Array(await resp.arrayBuffer()));
+      return URL.createObjectURL(new Blob([data], { type: a.content_type }));
+    })();
+    url.catch(() => fileUrls.delete(a.id));
+    fileUrls.set(a.id, url);
+  }
+  return fileUrls.get(a.id);
+}
+
+function renderEncryptedAttachment(a) {
+  const save = () => run(async () => {
+    const link = el("a", { href: await decryptedUrl(a), download: a.filename });
+    link.click();
+  });
+  const fileLink = () => el("button", { type: "button", class: "small link", onclick: save, textContent: `📎 ${a.filename} (${formatSize(a.size_bytes)})` });
+  if (a.content_type.startsWith("image/") && a.size_bytes <= 16 * 1024 * 1024) {
+    const img = el("img", { alt: a.filename, title: `${a.filename} – click to save`, onclick: save });
+    decryptedUrl(a).then((src) => { img.src = src; }).catch(() => img.replaceWith(fileLink()));
+    return el("div", { class: "attachment" }, img);
+  }
+  return el("div", { class: "attachment" }, fileLink());
 }
 
 function addMessage(m) {
@@ -894,15 +926,19 @@ $("composer").addEventListener("submit", async (ev) => {
   const send = $("composer").querySelector("button[type=submit]");
   send.disabled = true;
   try {
-    const ids = [];
+    requireApproval();
+    const files = [];
     for (const file of state.pendingFiles) {
       setStatus(`Uploading ${file.name}…`);
+      // The server gets only the encrypted bytes; name, type and key travel in the message.
+      const sealed = await sealFile(new Uint8Array(await file.arrayBuffer()));
       const form = new FormData();
-      form.append("file", file, file.name);
+      form.append("file", new Blob([sealed.data], { type: "application/octet-stream" }), "encrypted");
       const info = await request("POST", `/channels/${ch.id}/attachments`, form, true);
-      ids.push(info.id);
+      files.push({ id: info.id, name: file.name, type: file.type || "application/octet-stream", size: file.size, key: sealed.key });
     }
-    const body = await outgoing(ch.id, content);
+    const ids = files.map((f) => f.id);
+    const body = await outgoing(ch.id, content, files);
     const message = await openMessage(await api("POST", `/channels/${ch.id}/messages`, { ...body, attachment_ids: ids }));
     state.pendingFiles = [];
     renderPending();
@@ -1502,12 +1538,17 @@ function browserName() {
  * The post fields of a message: encrypted with the channel key and with the
  * mentioned users named, since the server cannot read them.
  */
-async function outgoing(channelId, content) {
+function requireApproval() {
   if (!state.keyring?.approved) throw new Error("Approve this browser for encryption first (click your name).");
+}
+
+async function outgoing(channelId, content, files = []) {
+  requireApproval();
   const names = mentionedNames(content);
   const users = [...state.members.values(), ...state.dms.map((d) => d.user)];
   const mentions = [...new Set(users.filter((u) => names.includes(u.name?.toLowerCase())).map((u) => u.id ?? u.user_id))];
-  return { ...(await state.keyring.encrypt(channelId, { text: content })), mentions };
+  const body = files?.length ? { text: content, files } : { text: content };
+  return { ...(await state.keyring.encrypt(channelId, body)), mentions };
 }
 
 /** Decrypts an encrypted message in place; marks it locked without a key. */
@@ -1518,6 +1559,7 @@ async function openMessage(m) {
     if (!state.keyring) throw new Error("no keys");
     const body = await state.keyring.decrypt(m.channel_id, m.author_id, m.envelope);
     m.content = typeof body.text === "string" ? body.text : "";
+    applyFiles(m, body.files);
     m.opened = true;
     m.locked = false;
   } catch {
@@ -1525,6 +1567,20 @@ async function openMessage(m) {
     m.locked = true;
   }
   return m;
+}
+
+/** Puts the names, types and keys from an encrypted message on its attachments. */
+function applyFiles(m, files) {
+  if (!Array.isArray(files)) return;
+  m.files = files.filter((f) => f && typeof f.id === "string" && typeof f.key === "string");
+  for (const a of m.attachments || []) {
+    const f = m.files.find((x) => x.id === a.id);
+    if (!f) continue;
+    a.filename = String(f.name || "file");
+    a.content_type = String(f.type || "application/octet-stream");
+    a.size_bytes = Number(f.size) || a.size_bytes;
+    a.key = f.key;
+  }
 }
 
 /** Tries locked messages of the open channel again, e.g. after keys arrived. */

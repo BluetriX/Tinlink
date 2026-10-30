@@ -78,3 +78,12 @@ test("messages", async () => {
   await assert.rejects(e2ee.openMessage({ channelId: v.channel_id, envelope: e2ee.parseEnvelope(e2ee.toBase64(raw)), channelKey: hex(v.channel_key), signKey: hex(v.device_sign_public) }));
   assert.throws(() => e2ee.parseEnvelope("AAAA"));
 });
+
+test("files", async () => {
+  const data = new TextEncoder().encode("a file");
+  const sealed = await e2ee.sealFile(data);
+  assert.equal(sealed.data.length, 12 + data.length + 16);
+  assert.deepEqual(await e2ee.openFile(sealed.key, sealed.data), data);
+  sealed.data[20] ^= 1;
+  await assert.rejects(e2ee.openFile(sealed.key, sealed.data));
+});
