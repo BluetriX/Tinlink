@@ -1665,6 +1665,7 @@ function wireRoom(room) {
   const E = LK.RoomEvent;
   room
     .on(E.TrackSubscribed, (track, pub, participant) => {
+      applyPlayoutDelay(track);
       if (track.kind === "audio") {
         const audio = track.attach();
         $("audio-sink").append(audio);
@@ -2012,6 +2013,18 @@ function updateSpeaking() {
 
 // -------------------------------------------------------------- screens
 
+/**
+ * Low-latency playback: asks the browser to keep its receive buffer as small
+ * as possible (0 ms target) instead of its own adaptive default.
+ */
+function applyPlayoutDelay(track) {
+  const receiver = track?.receiver;
+  if (!receiver) return;
+  const low = $("low-latency").checked;
+  if ("jitterBufferTarget" in receiver) receiver.jitterBufferTarget = low ? 0 : null;
+  else if ("playoutDelayHint" in receiver) receiver.playoutDelayHint = low ? 0 : null;
+}
+
 function showScreen(participant, track) {
   const video = track.attach();
   video.muted = true;
@@ -2048,10 +2061,12 @@ $("share-start").addEventListener("click", async () => {
   const height = Number($("share-resolution").value);
   const fps = Number($("share-fps").value);
   const size = shareSize(height);
+  const hint = $("share-hint").value;
+  const degradation = $("share-degradation").value;
   try {
     const pub = await room.localParticipant.setScreenShareEnabled(true, {
       audio: true,
-      contentHint: fps > 30 ? "motion" : "detail",
+      contentHint: hint === "auto" ? (fps > 30 ? "motion" : "detail") : hint,
       resolution: size ? { width: size[0], height: size[1], frameRate: fps } : { frameRate: fps },
       selfBrowserSurface: "exclude",
       surfaceSwitching: "include",
@@ -2060,6 +2075,7 @@ $("share-start").addEventListener("click", async () => {
       // One full-resolution layer: text stays sharp for every viewer.
       simulcast: false,
       screenShareEncoding: { maxBitrate: shareBitrate(height, fps), maxFramerate: fps },
+      ...(degradation === "auto" ? {} : { degradationPreference: degradation }),
     });
     const media = pub?.track?.mediaStreamTrack;
     if (!media) return; // picker cancelled
@@ -2316,6 +2332,17 @@ async function init() {
   $("camera-quality").addEventListener("change", () => settings.save({ cameraQuality: $("camera-quality").value }));
   $("share-resolution").addEventListener("change", () => settings.save({ shareResolution: $("share-resolution").value }));
   $("share-fps").addEventListener("change", () => settings.save({ shareFps: $("share-fps").value }));
+  if (saved.shareHint) $("share-hint").value = saved.shareHint;
+  if (saved.shareDegradation) $("share-degradation").value = saved.shareDegradation;
+  $("low-latency").checked = !!saved.lowLatency;
+  $("share-hint").addEventListener("change", () => settings.save({ shareHint: $("share-hint").value }));
+  $("share-degradation").addEventListener("change", () => settings.save({ shareDegradation: $("share-degradation").value }));
+  $("low-latency").addEventListener("change", () => {
+    settings.save({ lowLatency: $("low-latency").checked });
+    for (const p of voice.room?.remoteParticipants.values() || []) {
+      for (const pub of p.trackPublications.values()) applyPlayoutDelay(pub.track);
+    }
+  });
   api("GET", "/info").then((info) => {
     if (info?.source_url) $("source-link").href = info.source_url;
   }).catch(() => {});

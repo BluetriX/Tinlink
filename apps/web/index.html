@@ -96,6 +96,24 @@
               </select>
             </label>
           </div>
+          <div class="row">
+            <label>Share optimized for
+              <select id="share-hint" title="Motion keeps the frame rate smooth; sharpness keeps text crisp">
+                <option value="auto" selected>Auto (by fps)</option>
+                <option value="motion">Motion</option>
+                <option value="detail">Sharpness</option>
+              </select>
+            </label>
+            <label>When the link is busy
+              <select id="share-degradation" title="What the browser gives up first when bandwidth or CPU runs short">
+                <option value="auto" selected>Browser decides</option>
+                <option value="maintain-framerate">Keep frame rate</option>
+                <option value="maintain-resolution">Keep resolution</option>
+              </select>
+            </label>
+          </div>
+          <label class="inline"><input type="checkbox" id="low-latency"> Low-latency playback</label>
+          <p class="hint">Plays voice and screens as early as possible. Saves a few to some tens of milliseconds, but on a shaky connection you may hear more crackles or see more stutter.</p>
         </details>
       </section>
 

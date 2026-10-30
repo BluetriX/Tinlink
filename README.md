@@ -239,6 +239,12 @@ browser limits: push-to-talk only works while the tab has focus, and screen
 sharing uses the browser's encoder. `LIVEKIT_PUBLIC_URL` must be a `wss://` URL,
 since an HTTPS page may not open plain WebSocket connections.
 
+Voice settings also offer "Low-latency playback" (asks the browser for a 0 ms
+receive buffer target instead of its adaptive default) and, for screen sharing,
+what to optimise for (motion or sharpness) and what to give up first when the
+link is busy (frame rate or resolution). The defaults keep the browser's own
+behaviour.
+
 Tests of the pure logic run with `node --test apps/web/tests/*.test.js`.
 
 ## Desktop client
