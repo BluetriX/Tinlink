@@ -47,6 +47,21 @@ pub struct ShareSettings {
     /// keeps the native resolution. Never scales up.
     pub max_height: Option<u32>,
     pub fps: u32,
+    #[serde(default)]
+    pub capture: CaptureMode,
+}
+
+/// How the screen is captured when a hardware encoder exists.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CaptureMode {
+    /// Capture, convert and encode on the GPU; falls back to `Cpu` if that
+    /// pipeline cannot start.
+    #[default]
+    Gpu,
+    /// libwebrtc's capturer with the conversion on the CPU (for drivers
+    /// that misbehave with the GPU pipeline).
+    Cpu,
 }
 
 /// Software H.264 (OpenH264) cannot keep up beyond this.
@@ -97,6 +112,8 @@ pub struct ShareInfo {
     pub height: u32,
     pub fps: u32,
     pub bitrate_bps: u32,
+    /// The capture path actually used.
+    pub capture: CaptureMode,
 }
 
 fn capturer() -> Option<DesktopCapturer> {
@@ -234,7 +251,7 @@ fn capture_thread(
     stop: Arc<AtomicBool>,
     ready_tx: oneshot::Sender<Ready>,
 ) {
-    if std::env::var_os("TINLINK_CPU_CAPTURE").is_none() {
+    if settings.capture == CaptureMode::Gpu && std::env::var_os("TINLINK_CPU_CAPTURE").is_none() {
         match gpu_share(source_id, settings) {
             Ok((encoder, source, info)) => {
                 let max_bitrate = info.bitrate_bps;
@@ -325,6 +342,7 @@ fn gpu_share(
         height: hw.size.1,
         fps: hw.fps,
         bitrate_bps: hw.bitrate,
+        capture: CaptureMode::Gpu,
     };
     Ok((encoder, source, info))
 }
@@ -478,6 +496,7 @@ impl FrameSink {
                     height: size.1,
                     fps: hw.fps,
                     bitrate_bps: hw.bitrate,
+                    capture: CaptureMode::Cpu,
                 };
                 (
                     Output::Hardware {
@@ -508,6 +527,7 @@ impl FrameSink {
                     height: size.1,
                     fps: sw.fps,
                     bitrate_bps: sw.bitrate,
+                    capture: CaptureMode::Cpu,
                 };
                 (Output::Software { source, size }, info)
             }
@@ -612,6 +632,7 @@ mod tests {
         let native60 = ShareSettings {
             max_height: None,
             fps: 60,
+            capture: CaptureMode::Gpu,
         };
         let hw = plan((3840, 2160), native60, true);
         assert_eq!((hw.size, hw.fps), ((3840, 2160), 60));
@@ -623,6 +644,7 @@ mod tests {
         let small = ShareSettings {
             max_height: Some(720),
             fps: 15,
+            capture: CaptureMode::Gpu,
         };
         let p720 = plan((2560, 1440), small, true);
         assert_eq!((p720.size, p720.fps), ((1280, 720), 15));
@@ -633,9 +655,20 @@ mod tests {
             ShareSettings {
                 max_height: Some(1440),
                 fps: 60,
+                capture: CaptureMode::Gpu,
             },
             true,
         );
         assert_eq!(p1440.bitrate, 13_271_040);
+    }
+
+    #[test]
+    fn capture_mode_defaults_to_gpu() {
+        let settings: ShareSettings =
+            serde_json::from_str(r#"{"maxHeight":null,"fps":30}"#).unwrap();
+        assert_eq!(settings.capture, CaptureMode::Gpu);
+        let settings: ShareSettings =
+            serde_json::from_str(r#"{"maxHeight":720,"fps":30,"capture":"cpu"}"#).unwrap();
+        assert_eq!(settings.capture, CaptureMode::Cpu);
     }
 }

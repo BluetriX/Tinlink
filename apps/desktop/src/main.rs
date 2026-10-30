@@ -10,6 +10,7 @@ mod cameras;
 mod dsp;
 mod listen;
 mod mic;
+mod prefs;
 mod ptt;
 mod screen;
 mod session;
@@ -95,6 +96,17 @@ impl StartupOptions {
         }
         opts
     }
+}
+
+/// Settings that apply from the next start of the app.
+#[tauri::command]
+fn early_prefs(app: AppHandle) -> prefs::EarlyPrefs {
+    prefs::load(&app)
+}
+
+#[tauri::command]
+fn set_early_prefs(app: AppHandle, prefs: prefs::EarlyPrefs) -> CmdResult<()> {
+    prefs::save(&app, &prefs).map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -443,13 +455,6 @@ fn main() {
         )
         .init();
 
-    // Render received video as soon as it is decoded instead of smoothing
-    // playout; screen sharing favours latency over fluidity. Must run before
-    // the WebRTC runtime is created by the first room connection.
-    if let Err(e) = livekit::webrtc::enable_zero_playout_delay() {
-        tracing::warn!("zero playout delay unavailable: {e}");
-    }
-
     tauri::Builder::default()
         .manage(StartupOptions::parse(std::env::args().skip(1)))
         .manage(AppState {
@@ -463,6 +468,15 @@ fn main() {
             platform_audio: Default::default(),
         })
         .setup(|app| {
+            // Render received video as soon as it is decoded instead of
+            // smoothing playout (screen sharing favours latency over
+            // fluidity). Must run before the WebRTC runtime exists, i.e.
+            // before the first audio device or room access.
+            if prefs::load(app.handle()).low_latency_playback
+                && let Err(e) = livekit::webrtc::enable_zero_playout_delay()
+            {
+                tracing::warn!("zero playout delay unavailable: {e}");
+            }
             create_main_window(app)?;
             let key = app.state::<AppState>().ptt_key.clone();
             ptt::start(app.handle().clone(), key);
@@ -476,6 +490,8 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             startup_options,
+            early_prefs,
+            set_early_prefs,
             dev_join,
             account::build_info,
             account::restore,

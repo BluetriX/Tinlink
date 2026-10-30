@@ -296,18 +296,24 @@ never in the WebView:
 
 - Audio: WebRTC's audio device module (WASAPI on Windows) with its echo
   cancellation, noise suppression and gain control; Opus with DTX and RED.
-- Screen sharing: libwebrtc's desktop capturer (Windows Graphics Capture, DXGI
-  fallback), H.264. The SDK has no hardware encoder on Windows (its NVENC support
-  is Linux only), so `crates/hwenc` drives the GPU's Media Foundation encoder
-  (NVENC, AMF, Quick Sync) and feeds pre-encoded frames into the SDK, up to
-  native 4K at 60 fps. Without a hardware encoder, WebRTC encodes in software
-  (OpenH264) at up to 1080p, 30 fps. Resolution (native, 1440p, 1080p, 720p;
+- Screen sharing: H.264. The SDK has no hardware encoder on Windows (its NVENC
+  support is Linux only), so `crates/hwenc` drives the GPU's Media Foundation
+  encoder (NVENC, AMF, Quick Sync) and feeds pre-encoded frames into the SDK, up
+  to native 4K at 60 fps. By default the whole pipeline stays on the GPU: Windows
+  Graphics Capture hands over D3D11 textures, the D3D11 video processor converts
+  and scales them to NV12, and the encoder reads those textures; a frame is taken
+  as soon as the desktop changes. The "CPU" capture setting (and the automatic
+  fallback) uses libwebrtc's desktop capturer with the conversion on the CPU.
+  Without a hardware encoder, WebRTC encodes in software (OpenH264) at up to
+  1080p, 30 fps. Resolution (native, 1440p, 1080p, 720p;
   only scales down) and frame rate (60, 30, 15; default 1080p, 30) are chosen in
   the voice settings and can be changed while sharing; the bitrate follows
   (0.06 bit per pixel and frame, 1.5 to 20 Mbit/s). `crates/hwenc` uses `unsafe`
   for the COM calls; apart from it only `crates/winput` does (one Win32 call).
 - Viewing: decoded frames are scaled with libyuv and drawn with softbuffer;
-  only the newest frame is rendered, and the receiver uses zero playout delay.
+  only the newest frame is rendered. "Low-latency video playback" (default on,
+  applies from the next start) shows frames as soon as they are decoded; turned
+  off, WebRTC smooths playout, which adds about 50 ms.
 
 Latency measurements (one PC, Ryzen 7 5700X3D, RTX 3070, local LiveKit, so the
 network part is close to zero; over the internet add the round trip to the server):
@@ -317,7 +323,9 @@ network part is close to zero; over the internet add the round trip to the serve
 | Voice: RTT to the SFU / jitter / receive jitter buffer | 0–1 ms / 1–2 ms / 20–35 ms |
 | Voice: estimated mouth to ear (10 ms capture, 20 ms Opus frame, jitter buffer, playout) | 60–90 ms |
 | Screen sharing: hardware encode (NVENC via Media Foundation, 720p) | 2.7 ms median |
-| Screen sharing: glass to glass, 2560×1440 at 60 fps | about 60–70 ms |
+| Screen sharing: glass to glass, 2560×1440 at 60 fps (GPU / CPU capture) | about 48 / 67 ms |
+| Screen sharing: glass to glass, 3840×2160 at 60 fps (GPU / CPU capture) | about 61 / 85 ms |
+| Screen sharing: CPU of the sharing client at 1440p60 (GPU / CPU capture) | about 13 / 130 % of one core |
 | CPU in a voice call, per client | about 4–5 % of one core |
 
 Glass to glass was measured with a millisecond clock on screen next to its own

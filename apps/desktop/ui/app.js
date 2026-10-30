@@ -2012,7 +2012,11 @@ $("voice-leave").addEventListener("click", async () => {
 
 function shareSettings() {
   const height = $("share-height").value;
-  return { maxHeight: height === "native" ? null : Number(height), fps: Number($("share-fps").value) };
+  return {
+    maxHeight: height === "native" ? null : Number(height),
+    fps: Number($("share-fps").value),
+    capture: $("share-capture").value,
+  };
 }
 
 async function startShare() {
@@ -2026,7 +2030,9 @@ async function startShare() {
   if (!info) return false;
   $("share-start").hidden = true;
   $("share-stop").hidden = false;
-  const encoder = info.encoder ?? "software H.264 (no hardware encoder found)";
+  const encoder = info.encoder
+    ? `${info.encoder} (${info.capture === "gpu" ? "GPU" : "CPU"} capture)`
+    : "software H.264 (no hardware encoder found)";
   const mbit = (info.bitrateBps / 1e6).toFixed(1);
   $("share-info").textContent = `Sharing ${info.width}×${info.height} @ ${info.fps} fps · up to ${mbit} Mbit/s · ${encoder}`;
   $("share-info").hidden = false;
@@ -2036,9 +2042,13 @@ async function startShare() {
 $("share-start").addEventListener("click", startShare);
 
 // Changing the quality while sharing restarts the share with the new values.
-for (const id of ["share-height", "share-fps"]) {
+for (const id of ["share-height", "share-fps", "share-capture"]) {
   $(id).addEventListener("change", async () => {
-    settings.save({ shareHeight: $("share-height").value, shareFps: $("share-fps").value });
+    settings.save({
+      shareHeight: $("share-height").value,
+      shareFps: $("share-fps").value,
+      shareCapture: $("share-capture").value,
+    });
     if ($("share-stop").hidden) return;
     await run(() => invoke("stop_share"));
     if (!(await startShare())) {
@@ -2420,6 +2430,14 @@ async function init() {
   if (saved.pttKey) await run(() => invoke("set_ptt_key", { key: saved.pttKey }));
   if (saved.shareHeight) $("share-height").value = saved.shareHeight;
   if (saved.shareFps) $("share-fps").value = saved.shareFps;
+  if (saved.shareCapture) $("share-capture").value = saved.shareCapture;
+  const early = await invoke("early_prefs");
+  $("low-latency").checked = early.lowLatencyPlayback;
+  $("low-latency").addEventListener("change", async () => {
+    const lowLatencyPlayback = $("low-latency").checked;
+    await run(() => invoke("set_early_prefs", { prefs: { ...early, lowLatencyPlayback } }));
+    $("low-latency-hint").hidden = lowLatencyPlayback === early.lowLatencyPlayback;
+  });
   if (saved.cameraQuality) $("camera-quality").value = saved.cameraQuality;
   const threshold = saved.vaThreshold ?? -50;
   $("va-threshold").value = String(threshold);

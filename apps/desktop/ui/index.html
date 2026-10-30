@@ -112,6 +112,16 @@
               </select>
             </label>
           </div>
+          <label title="GPU: capture, conversion and encoding stay on the graphics card (lowest latency and CPU load). CPU: the older path, for drivers that have trouble with it.">Capture
+            <select id="share-capture">
+              <option value="gpu" selected>GPU (fastest)</option>
+              <option value="cpu">CPU (compatibility)</option>
+            </select>
+          </label>
+          <label class="inline" title="Shows received video as soon as it is decoded. Turn it off for smoother playback on unstable connections.">
+            <input id="low-latency" type="checkbox" checked> Low-latency video playback
+          </label>
+          <p id="low-latency-hint" class="muted" hidden>Takes effect after restarting Tinlink.</p>
         </details>
       </section>
 
