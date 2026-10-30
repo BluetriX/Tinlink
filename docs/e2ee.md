@@ -3,9 +3,9 @@
 Status: the server stores keys; the web and the desktop client set up
 devices, the recovery key and channel keys, and can encrypt voice, webcams
 and screen shares with channel keys (opt-in in the voice settings for now).
-The web client encrypts every new message. The desktop UI runs the web
-client's `e2ee.js` and `keyring.js` (copied by its build script) and hands
-only the derived media keys to the Rust core. Files are not encrypted yet.
+Both clients encrypt every new message. The desktop UI runs the web
+client's `e2ee.js`, `keyring.js` and `logic.js` (copied by its build script)
+and hands only the derived media keys to the Rust core. Files are not encrypted yet.
 
 The server stores public keys and wrapped channel keys and decides who may
 fetch them. It never sees a private key, a channel key, a message or a media

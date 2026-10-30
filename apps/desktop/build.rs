@@ -1,7 +1,8 @@
 use std::path::Path;
 
-/// The web client's E2EE code, used unchanged by this UI (docs/e2ee.md).
-const SHARED: &[&str] = &["e2ee.js", "keyring.js"];
+/// Web client code used unchanged by this UI: E2EE (docs/e2ee.md) and the
+/// mention parser that must match it.
+const SHARED: &[&str] = &["e2ee.js", "keyring.js", "logic.js"];
 
 fn main() {
     let web = Path::new("../web");

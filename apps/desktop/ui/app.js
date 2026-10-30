@@ -235,6 +235,7 @@ $("logout").addEventListener("click", async () => {
 
 const e2ee = await import("./shared/e2ee.js");
 const { createKeyring } = await import("./shared/keyring.js");
+const { mentionedNames } = await import("./shared/logic.js");
 
 /** The core reports API errors as text; the keyring needs to see conflicts. */
 async function keyringApi(method, path, body) {
@@ -305,6 +306,7 @@ async function approveThisDevice() {
   if (keyring.approved) {
     setStatus("This device is approved for encryption");
     shareKeysSoon();
+    reopenLocked();
   }
 }
 
@@ -329,9 +331,47 @@ async function approvePendingDevices({ explicit = false } = {}) {
   }
 }
 
+/**
+ * The post fields of a message: encrypted with the channel key and with the
+ * mentioned users named, since the server cannot read them.
+ */
+async function outgoing(channelId, content) {
+  if (!state.keyring?.approved) throw new Error("Approve this device for encryption first (click your name).");
+  const names = mentionedNames(content);
+  const users = [...state.members.values(), ...state.dms.map((d) => d.user)];
+  const mentions = [...new Set(users.filter((u) => names.includes(u.name?.toLowerCase())).map((u) => u.id ?? u.user_id))];
+  return { ...(await state.keyring.encrypt(channelId, { text: content })), mentions };
+}
+
+/** Decrypts an encrypted message in place; marks it locked without a key. */
+async function openMessage(m) {
+  if (!m?.encrypted || m.opened) return m;
+  m.envelope ??= m.content;
+  try {
+    if (!state.keyring) throw new Error("no keys");
+    const body = await state.keyring.decrypt(m.channel_id, m.author_id, m.envelope);
+    m.content = typeof body.text === "string" ? body.text : "";
+    m.opened = true;
+    m.locked = false;
+  } catch {
+    m.content = "";
+    m.locked = true;
+  }
+  return m;
+}
+
+/** Tries locked messages of the open channel again, e.g. after keys arrived. */
+async function reopenLocked() {
+  for (const m of state.messages.filter((x) => x.locked)) {
+    await openMessage(m);
+    if (!m.locked) replaceMessage(m);
+  }
+}
+
 async function onKeysChanged(userId) {
   const keyring = state.keyring;
   if (!keyring) return;
+  keyring.forget(userId);
   if (userId === myId()) {
     const wasApproved = keyring.approved;
     const status = await keyring.refresh().catch(() => null);
@@ -339,6 +379,7 @@ async function onKeysChanged(userId) {
       // Approved from another device while the dialog is open.
       if ($("dialog").open && $("dialog-title").textContent === "Approve this device") $("dialog-cancel").click();
       setStatus("This device is approved for encryption");
+      reopenLocked();
     }
     if (status === "revoked") setupEncryption();
     else if (keyring.approved) approvePendingDevices();
@@ -353,6 +394,7 @@ async function onChannelKeysAdded(channelId) {
       await invoke("set_media_keys", { keys: await mediaKeysOf(channelId) });
     });
   }
+  if (state.channel?.id === channelId) reopenLocked();
   shareKeysSoon();
 }
 
@@ -911,8 +953,10 @@ async function runSearch(query, more = false) {
   const page = await run(() => api("GET", `/search?${params}`));
   if (!page) return;
   search.query = query;
-  search.hits = more ? [...search.hits, ...page] : page;
   const terms = searchTerms(query);
+  // The server cannot search encrypted messages; add the loaded ones that match.
+  if (!more) page.unshift(...localHits(terms).filter((h) => !page.some((p) => p.id === h.id)));
+  search.hits = more ? [...search.hits, ...page] : page;
   const hits = page.map((h) => renderHit(h, terms));
   if (more) $("search-hits").append(...hits);
   else $("search-hits").replaceChildren(...hits);
@@ -935,6 +979,17 @@ function highlighted(text, terms) {
   }
   nodes.push(text.slice(pos));
   return nodes;
+}
+
+/** Opened encrypted messages of the open channel that contain every term. */
+function localHits(terms) {
+  const ch = state.channel;
+  if (!ch || !terms.length) return [];
+  const dm = dmById(ch.id);
+  return state.messages
+    .filter((m) => m.encrypted && !m.locked && terms.every((t) => m.content.toLowerCase().includes(t)))
+    .reverse()
+    .map((m) => ({ ...m, group_id: dm ? null : ch.group_id, channel_name: dm ? dm.user.display_name : ch.name }));
 }
 
 function renderHit(h, terms) {
@@ -1145,6 +1200,8 @@ async function loadMessages(before) {
   const query = before ? `?limit=50&before=${before}` : "?limit=50";
   const page = await run(() => api("GET", `/channels/${ch.id}/messages${query}`));
   if (!page || state.channel !== ch) return;
+  await Promise.all(page.map(openMessage));
+  if (state.channel !== ch) return;
   if (page.length < 50) state.noOlder = true;
   page.reverse();
   const box = $("messages");
@@ -1194,7 +1251,8 @@ function renderMessage(m) {
       el("div", { class: "meta" },
         el("strong", { textContent: author.display_name || m.author_name || "deleted user" }),
         el("span", { textContent: formatTime(m.created_at) + (m.edited_at ? " (edited)" : "") })),
-      m.content ? el("div", { class: "text", textContent: m.content }) : null,
+      m.locked ? el("div", { class: "text muted", textContent: "Encrypted message; its key has not reached this device yet." })
+        : m.content ? el("div", { class: "text", textContent: m.content }) : null,
       ...(m.attachments || []).map(renderAttachment)));
   if (mine || canDelete) {
     node.append(el("span", { class: "actions" },
@@ -1210,7 +1268,8 @@ function editMessage(m, node) {
   const save = async () => {
     const content = box.value.trim();
     if (!content || content === m.content) return replaceMessage(m);
-    const updated = await run(() => api("PATCH", `/channels/${m.channel_id}/messages/${m.id}`, { content }));
+    const updated = await run(async () => openMessage(
+      await api("PATCH", `/channels/${m.channel_id}/messages/${m.id}`, await outgoing(m.channel_id, content))));
     if (updated) replaceMessage(updated);
   };
   box.addEventListener("keydown", (ev) => {
@@ -1463,7 +1522,8 @@ $("composer").addEventListener("submit", async (ev) => {
       });
       ids.push(info.id);
     }
-    const message = await api("POST", `/channels/${ch.id}/messages`, { content, attachment_ids: ids });
+    const body = await outgoing(ch.id, content);
+    const message = await openMessage(await api("POST", `/channels/${ch.id}/messages`, { ...body, attachment_ids: ids }));
     state.pendingFiles = [];
     renderPending();
     $("message-input").value = "";
@@ -1993,11 +2053,13 @@ listen("gateway", (ev) => {
   const inGroup = state.group && e.group_id === state.group.id;
   switch (e.type) {
     case "message_created":
-      addMessage(e.data);
-      trackNewMessage(e);
+      openMessage(e.data).then(() => {
+        addMessage(e.data);
+        trackNewMessage(e);
+      });
       break;
     case "message_updated":
-      replaceMessage(e.data);
+      openMessage(e.data).then(replaceMessage);
       break;
     case "presence_changed": {
       const member = inGroup ? state.members.get(e.user_id) : null;
