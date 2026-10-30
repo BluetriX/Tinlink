@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Synthesizes Tinlink's notification sounds.
+"""Synthesizes Tinlink's notification sound packs.
 
-Every sound is built here from oscillators and envelopes: no samples, no
-recordings, so the files are ours (same license as the clients). The output
-is deterministic; CI checks that the committed files match this script.
+Sounds come in packs: sounds/<pack>/<sound>.wav in both clients, listed in
+sounds.js. The packs in PACKS below are built here from oscillators and
+envelopes: no samples, no recordings, so the files are ours (same license as
+the clients). The output is deterministic; CI checks that the committed files
+match this script. A pack made some other way (e.g. CC0 recordings) only needs
+its files and an entry in sounds.js; missing sounds fall back to "retro".
 
     python3 tools/sounds/generate.py            # writes into both clients
     python3 tools/sounds/generate.py --out DIR  # writes somewhere else
@@ -137,7 +140,7 @@ def envelope(t, dur, attack, release):
     return 1.0
 
 
-# ------------------------------------------------------------------ sounds
+# ------------------------------------------------------- pack "retro"
 # Short, clear and synthetic. Up = something starts or someone arrives,
 # down = something ends or someone goes.
 
@@ -214,7 +217,7 @@ def talking_muted():
 
 
 # name -> (builder, peak level in dBFS); levels balance perceived loudness.
-SOUNDS = {
+RETRO = {
     "connected": (connected, -6),
     "disconnected": (disconnected, -6),
     "user-joined": (user_joined, -7),
@@ -225,6 +228,8 @@ SOUNDS = {
     "message": (message, -8),
     "talking-muted": (talking_muted, -13),
 }
+
+PACKS = {"retro": RETRO}
 
 
 def to_pcm(samples):
@@ -258,21 +263,30 @@ def main():
     args = parser.parse_args()
     targets = args.out or TARGETS
     stale = []
-    for name, (build, peak_db) in SOUNDS.items():
-        pcm = to_pcm(build().samples(peak_db))
-        for directory in targets:
-            path = directory / f"{name}.wav"
-            if args.check:
-                if not matches(path, pcm):
-                    stale.append(path)
-                continue
-            directory.mkdir(parents=True, exist_ok=True)
-            write_wav(path, pcm)
-        print(f"{name}.wav  {len(pcm) / RATE:.2f} s")
+    for pack, sounds in PACKS.items():
+        for name, (build, peak_db) in sounds.items():
+            stale += build_sound(pack, name, build, peak_db, targets, args.check)
     if stale:
         for path in stale:
-            print(f"out of date: {path.relative_to(ROOT)}")
+            print(f"out of date: {path}")
         sys.exit("run tools/sounds/generate.py and commit the result")
+
+
+def build_sound(pack, name, build, peak_db, targets, check):
+    """Writes (or with `check` compares) one sound; returns stale paths."""
+    stale = []
+    pcm = to_pcm(build().samples(peak_db))
+    for base in targets:
+        directory = base / pack
+        path = directory / f"{name}.wav"
+        if check:
+            if not matches(path, pcm):
+                stale.append(path)
+            continue
+        directory.mkdir(parents=True, exist_ok=True)
+        write_wav(path, pcm)
+    print(f"{pack}/{name}.wav  {len(pcm) / RATE:.2f} s")
+    return stale
 
 
 if __name__ == "__main__":

@@ -1,6 +1,13 @@
-// Notification sounds. The files in sounds/ are synthesized by
-// tools/sounds/generate.py (no samples). This file is shared verbatim by the
-// web and the desktop client; CI checks both copies are the same.
+// Notification sounds, in packs: sounds/<pack>/<sound>.wav. The "retro"
+// pack is synthesized by tools/sounds/generate.py (no samples). This file is
+// shared verbatim by the web and the desktop client; CI checks both copies
+// are the same.
+
+/** Available packs; a pack may leave sounds out, those come from DEFAULT_PACK. */
+export const PACKS = [
+  { id: "retro", label: "Retro" },
+];
+const DEFAULT_PACK = "retro";
 
 export const SOUNDS = [
   { id: "connected", label: "You joined a voice channel" },
@@ -14,7 +21,7 @@ export const SOUNDS = [
   { id: "talking-muted", label: "Talking while nobody hears you" },
 ];
 
-const DEFAULTS = { on: true, volume: 0.5, off: [] };
+const DEFAULTS = { on: true, volume: 0.5, off: [], pack: DEFAULT_PACK };
 
 /**
  * `load`/`save` read and patch the client's settings object; the sound
@@ -24,15 +31,24 @@ export function createSounds({ load, save }) {
   const cache = new Map();
   let sinkId = "";
 
-  const current = () => ({ ...DEFAULTS, ...(load().sounds || {}) });
+  const current = () => {
+    const s = { ...DEFAULTS, ...(load().sounds || {}) };
+    if (!PACKS.some((p) => p.id === s.pack)) s.pack = DEFAULT_PACK;
+    return s;
+  };
   const update = (patch) => save({ sounds: { ...current(), ...patch } });
 
-  function audio(id) {
-    let base = cache.get(id);
+  /** The loaded file of a sound; one the pack lacks comes from the default pack. */
+  function audio(pack, id) {
+    const key = `${pack}/${id}`;
+    let base = cache.get(key);
     if (!base) {
-      base = new Audio(`sounds/${id}.wav`);
+      base = new Audio(`sounds/${key}.wav`);
       base.preload = "auto";
-      cache.set(id, base);
+      if (pack !== DEFAULT_PACK) {
+        base.addEventListener("error", () => cache.set(key, audio(DEFAULT_PACK, id)), { once: true });
+      }
+      cache.set(key, base);
     }
     return base;
   }
@@ -43,7 +59,7 @@ export function createSounds({ load, save }) {
     if (!force && (!s.on || s.off.includes(id))) return;
     if (s.volume <= 0) return;
     // A clone, so the same sound can overlap itself.
-    const node = audio(id).cloneNode();
+    const node = audio(s.pack, id).cloneNode();
     node.volume = Math.min(1, s.volume);
     if (sinkId && node.setSinkId) node.setSinkId(sinkId).catch(() => {});
     node.play().catch(() => {}); // autoplay not yet allowed: stay silent
@@ -54,9 +70,15 @@ export function createSounds({ load, save }) {
     sinkId = id || "";
   }
 
-  /** Builds the settings block: on/off, volume and a list with previews. */
+  /** Builds the settings block: on/off, pack, volume and a list with previews. */
   function renderSettings(el) {
     const s = current();
+    const pack = el("select", {
+      onchange: () => {
+        update({ pack: pack.value });
+        play("connected", { force: true });
+      },
+    }, ...PACKS.map((p) => el("option", { value: p.id, textContent: p.label, selected: p.id === s.pack })));
     const on = el("input", {
       type: "checkbox", checked: s.on,
       onchange: () => {
@@ -92,6 +114,7 @@ export function createSounds({ load, save }) {
       }));
     return el("div", { class: "sound-settings" },
       el("label", { class: "inline" }, on, " Sounds"),
+      el("label", {}, "Sound pack ", pack),
       el("label", {}, "Sound volume ", pct, volume),
       list);
   }
