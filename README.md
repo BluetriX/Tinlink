@@ -353,6 +353,9 @@ use that flow for quick media tests, e.g.
 With `TINLINK_DEVTOOLS_PORT=9222` a debug build opens the WebView's DevTools
 protocol on that port for UI automation. Debug builds accept the self-signed
 certificate of the local stack; release builds do not.
+`TINLINK_E2EE_TEST_KEY=<key>` turns on end-to-end frame encryption for voice,
+webcams and screen shares with a fixed key, until keys are distributed
+automatically; web users enter the same key under advanced voice settings.
 
 Voice activation transmits while the microphone level is above an adjustable
 threshold (slider with a live level meter in the voice settings) and keeps

@@ -1599,6 +1599,23 @@ function stopRemoteMeter(id) {
   if (voice.speaking.remove(id)) updateSpeaking();
 }
 
+/**
+ * Frame encryption options for a voice room, or undefined without a key.
+ * A string key goes through PBKDF2 like in the desktop client's SDK, so
+ * both decrypt each other's frames.
+ */
+async function mediaEncryption(key) {
+  if (!key) return undefined;
+  if (!LK.isE2EESupported()) throw new Error("this browser cannot encrypt voice end to end");
+  const keyProvider = new LK.ExternalE2EEKeyProvider();
+  await keyProvider.setKey(key);
+  // The SDK leaves the worker to us; the previous room is gone by now.
+  e2eeWorker?.terminate();
+  e2eeWorker = new Worker("vendor/livekit-client-2.22.4.e2ee.worker.js");
+  return { keyProvider, worker: e2eeWorker };
+}
+let e2eeWorker = null;
+
 /** Joins a channel's voice; returns whether it worked. */
 async function joinVoice(ch, { quiet = false } = {}) {
   unlockAudio();
@@ -1607,6 +1624,7 @@ async function joinVoice(ch, { quiet = false } = {}) {
     const token = await api("POST", `/channels/${ch.id}/voice-token`, {});
     await leaveVoice({ keepRejoin: true });
     const saved = settings.load();
+    const encryption = await mediaEncryption(saved.e2eeTestKey);
     const room = new LK.Room({
       adaptiveStream: true,
       dynacast: true,
@@ -1615,10 +1633,12 @@ async function joinVoice(ch, { quiet = false } = {}) {
         deviceId: saved.inputDevice || undefined,
       },
       audioOutput: { deviceId: saved.outputDevice || undefined },
+      encryption,
     });
     voice.room = room;
     voice.channel = ch;
     wireRoom(room);
+    if (encryption) await room.setE2EEEnabled(true);
     await room.connect(token.url, token.token);
     if (voice.room !== room) return false;
     await publishMic();
@@ -1717,6 +1737,11 @@ function wireRoom(room) {
     })
     .on(E.Reconnecting, () => {
       if (voice.channel) $("voice-status").textContent = `Voice: # ${voice.channel.name} (reconnecting…)`;
+    })
+    .on(E.EncryptionError, (error, participant) => {
+      // Usually a different key: that person's audio and video stay silent.
+      const who = participant ? participant.name || participant.identity : "voice";
+      setStatus(`Cannot decrypt ${who}: ${error?.message || error}`, true);
     })
     .on(E.Reconnected, () => {
       if (voice.channel) $("voice-status").textContent = `Voice: # ${voice.channel.name}`;
@@ -2335,6 +2360,8 @@ async function init() {
   if (saved.shareHint) $("share-hint").value = saved.shareHint;
   if (saved.shareDegradation) $("share-degradation").value = saved.shareDegradation;
   $("low-latency").checked = !!saved.lowLatency;
+  $("e2ee-test-key").value = saved.e2eeTestKey || "";
+  $("e2ee-test-key").addEventListener("change", () => settings.save({ e2eeTestKey: $("e2ee-test-key").value.trim() }));
   $("share-hint").addEventListener("change", () => settings.save({ shareHint: $("share-hint").value }));
   $("share-degradation").addEventListener("change", () => settings.save({ shareDegradation: $("share-degradation").value }));
   $("low-latency").addEventListener("change", () => {

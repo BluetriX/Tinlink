@@ -114,6 +114,10 @@
           </div>
           <label class="inline"><input type="checkbox" id="low-latency"> Low-latency playback</label>
           <p class="hint">Plays voice and screens as early as possible. Saves a few to some tens of milliseconds, but on a shaky connection you may hear more crackles or see more stutter.</p>
+          <label>Voice encryption test key
+            <input id="e2ee-test-key" type="password" autocomplete="off" placeholder="empty = off">
+          </label>
+          <p class="hint">Temporary, for testing end-to-end encryption: everyone in the voice channel must enter the same key. Takes effect on the next join.</p>
         </details>
       </section>
 

@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use livekit::e2ee::key_provider::{KeyProvider, KeyProviderOptions};
+use livekit::e2ee::{E2eeOptions, EncryptionType};
 use livekit::options::TrackPublishOptions;
 use livekit::prelude::*;
 use livekit::{PlatformAudio, RoomOptions};
@@ -170,6 +172,22 @@ fn livekit_http_base(url: &str) -> String {
     }
 }
 
+/// Frame encryption for voice, webcams and screen shares, while keys are
+/// not distributed yet: everyone in the channel sets the same test key in
+/// `TINLINK_E2EE_TEST_KEY` (the web client has a field for it). The SDK
+/// derives the AES-GCM key with PBKDF2 like the web client does for a
+/// string key, so both decrypt each other.
+fn media_encryption() -> Option<E2eeOptions> {
+    let key = std::env::var("TINLINK_E2EE_TEST_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())?;
+    tracing::info!("voice encryption on (test key)");
+    Some(E2eeOptions {
+        encryption_type: EncryptionType::Gcm,
+        key_provider: KeyProvider::with_shared_key(KeyProviderOptions::default(), key.into_bytes()),
+    })
+}
+
 /// Checks that LiveKit answers before connecting. A failed `Room::connect`
 /// leaves the SDK's audio engine blocked for the rest of the process, so
 /// an unreachable server must never get that far.
@@ -203,6 +221,7 @@ impl Session {
         let mut options = RoomOptions::default();
         options.auto_subscribe = true;
         options.dynacast = true;
+        options.encryption = media_encryption();
         let (room, events) = Room::connect(&token.url, &token.token, options)
             .await
             .with_context(|| format!("cannot connect to LiveKit at {}", token.url))?;
@@ -507,6 +526,15 @@ async fn event_loop(
                         Ok(()) => app.state::<AppState>().voice.resync(),
                         Err(e) => tracing::warn!("{e:#}"),
                     }
+                }
+            }
+            RoomEvent::E2eeStateChanged { participant, state } => {
+                use livekit::webrtc::native::frame_cryptor::EncryptionState as S;
+                match state {
+                    S::New | S::Ok | S::KeyRatcheted => {
+                        tracing::debug!(who = %participant.identity(), ?state, "frame encryption")
+                    }
+                    _ => tracing::warn!(who = %participant.identity(), ?state, "frame encryption"),
                 }
             }
             RoomEvent::Reconnecting => {
