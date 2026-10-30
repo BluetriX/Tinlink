@@ -32,6 +32,41 @@ impl From<windows::core::Error> for Error {
     }
 }
 
+/// COM and Media Foundation for the current thread, for as long as it lives.
+/// All COM objects of the thread must be released before it is dropped.
+pub(crate) struct Session {
+    com: bool,
+}
+
+impl Session {
+    pub(crate) fn start() -> Result<Self, Error> {
+        // SAFETY: initialises COM for this thread only; balanced in Drop.
+        let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+        // SAFETY: as above, for Media Foundation.
+        match unsafe { MFStartup(MF_VERSION, MFSTARTUP_LITE) } {
+            Ok(()) => Ok(Self { com }),
+            Err(e) => {
+                if com {
+                    // SAFETY: balances the successful CoInitializeEx above.
+                    unsafe { CoUninitialize() };
+                }
+                Err(e.into())
+            }
+        }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        // SAFETY: balances the successful MFStartup in `start`.
+        let _ = unsafe { MFShutdown() };
+        if self.com {
+            // SAFETY: balances the successful CoInitializeEx in `start`.
+            unsafe { CoUninitialize() };
+        }
+    }
+}
+
 /// Encoder thread entry point.
 pub(crate) fn run(
     config: Config,
@@ -40,49 +75,31 @@ pub(crate) fn run(
     ready: Sender<Result<String, Error>>,
     mut on_frame: impl FnMut(EncodedFrame),
 ) {
-    // SAFETY: initialises COM and Media Foundation for this thread only; both
-    // are balanced by the uninitialise calls below.
-    let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-    // SAFETY: as above.
-    let started = unsafe { MFStartup(MF_VERSION, MFSTARTUP_LITE) };
-    let mf_started = started.is_ok();
-
-    let result = match started {
-        Ok(()) => match Encoder::new(config) {
-            Ok(mut encoder) => {
-                tracing::info!(encoder = %encoder.name, ?config, "hardware encoder started");
-                let _ = ready.send(Ok(encoder.name.clone()));
-                let result = encoder.run(&input, &control, &mut on_frame);
-                encoder.shutdown();
-                result
-            }
-            Err(e) => {
-                let _ = ready.send(Err(e));
-                Ok(())
-            }
-        },
+    let session = match Session::start() {
+        Ok(session) => session,
         Err(e) => {
-            let _ = ready.send(Err(e.into()));
-            Ok(())
+            let _ = ready.send(Err(e));
+            return;
         }
     };
-    if let Err(e) = result {
-        tracing::error!("hardware encoder failed: {e}");
+    match Encoder::new(config, None) {
+        Ok(mut encoder) => {
+            tracing::info!(encoder = %encoder.name, ?config, "hardware encoder started");
+            let _ = ready.send(Ok(encoder.name.clone()));
+            if let Err(e) = encoder.run(&input, &control, &mut on_frame) {
+                tracing::error!("hardware encoder failed: {e}");
+            }
+            encoder.shutdown();
+        }
+        Err(e) => {
+            let _ = ready.send(Err(e));
+        }
     }
-
-    if mf_started {
-        // SAFETY: balances the successful MFStartup above; all MF objects of
-        // this thread have been released by now.
-        let _ = unsafe { MFShutdown() };
-    }
-    if com.is_ok() {
-        // SAFETY: balances the successful CoInitializeEx above.
-        unsafe { CoUninitialize() };
-    }
+    drop(session);
 }
 
-struct Encoder {
-    name: String,
+pub(crate) struct Encoder {
+    pub(crate) name: String,
     transform: IMFTransform,
     events: IMFMediaEventGenerator,
     codec: Option<ICodecAPI>,
@@ -94,11 +111,13 @@ struct Encoder {
     parameter_sets: Vec<u8>,
     config: Config,
     /// Inputs the encoder has asked for and not yet received.
-    credits: u32,
+    pub(crate) credits: u32,
 }
 
 impl Encoder {
-    fn new(config: Config) -> Result<Self, Error> {
+    /// With a DXGI device manager the encoder takes D3D11 textures
+    /// ([`Encoder::process_texture`]), else NV12 in system memory.
+    pub(crate) fn new(config: Config, d3d: Option<&IMFDXGIDeviceManager>) -> Result<Self, Error> {
         let (activate, name) = find_hardware_encoder()?;
         // SAFETY: all calls below are plain COM calls on valid interface
         // pointers owned by this function; out parameters point to locals.
@@ -108,6 +127,10 @@ impl Encoder {
             // Hardware MFTs are asynchronous and must be unlocked explicitly.
             attributes.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)?;
             let _ = attributes.SetUINT32(&MF_LOW_LATENCY, 1);
+            if let Some(manager) = d3d {
+                // Must come before the media types are set.
+                transform.ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, manager.as_raw() as usize)?;
+            }
 
             let (mut input_ids, mut output_ids) = ([0u32], [0u32]);
             // E_NOTIMPL means the stream ids are simply 0.
@@ -173,7 +196,10 @@ impl Encoder {
         }
     }
 
-    fn drain_events(&mut self, on_frame: &mut impl FnMut(EncodedFrame)) -> Result<(), Error> {
+    pub(crate) fn drain_events(
+        &mut self,
+        on_frame: &mut impl FnMut(EncodedFrame),
+    ) -> Result<(), Error> {
         loop {
             // SAFETY: COM call on a valid interface.
             let event = match unsafe { self.events.GetEvent(MF_EVENT_FLAG_NO_WAIT) } {
@@ -193,7 +219,7 @@ impl Encoder {
         }
     }
 
-    fn apply_control(&self, control: &Control) {
+    pub(crate) fn apply_control(&self, control: &Control) {
         let Some(codec) = &self.codec else { return };
         if control.keyframe.swap(false, Ordering::Relaxed) {
             set_value(codec, &CODECAPI_AVEncVideoForceKeyFrame, variant_u32(1));
@@ -221,10 +247,37 @@ impl Encoder {
             buffer.Unlock()?;
             buffer.SetCurrentLength(len)?;
 
+            self.process_buffer(&buffer, frame.timestamp_us)
+        }
+    }
+
+    /// Encodes an NV12 texture of the device given to [`Encoder::new`].
+    pub(crate) fn process_texture(
+        &self,
+        texture: &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+        timestamp_us: i64,
+    ) -> Result<(), Error> {
+        // SAFETY: COM calls on valid interfaces.
+        unsafe {
+            let buffer = MFCreateDXGISurfaceBuffer(
+                &windows::Win32::Graphics::Direct3D11::ID3D11Texture2D::IID,
+                texture,
+                0,
+                false,
+            )?;
+            let length = buffer.cast::<IMF2DBuffer>()?.GetContiguousLength()?;
+            buffer.SetCurrentLength(length)?;
+            self.process_buffer(&buffer, timestamp_us)
+        }
+    }
+
+    fn process_buffer(&self, buffer: &IMFMediaBuffer, timestamp_us: i64) -> Result<(), Error> {
+        // SAFETY: COM calls on valid interfaces.
+        unsafe {
             let sample = MFCreateSample()?;
-            sample.AddBuffer(&buffer)?;
+            sample.AddBuffer(buffer)?;
             // Media Foundation counts in 100 ns units.
-            sample.SetSampleTime(frame.timestamp_us * 10)?;
+            sample.SetSampleTime(timestamp_us * 10)?;
             sample.SetSampleDuration(10_000_000 / i64::from(self.config.fps.max(1)))?;
             self.transform.ProcessInput(self.input_id, &sample, 0)?;
         }
@@ -293,7 +346,7 @@ impl Encoder {
         }
     }
 
-    fn shutdown(&self) {
+    pub(crate) fn shutdown(&self) {
         // SAFETY: COM calls on valid interfaces; errors are irrelevant here.
         unsafe {
             let _ = self

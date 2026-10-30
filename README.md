@@ -18,9 +18,10 @@ A Discord / TeamSpeak replacement with a focus on **low latency**.
 - **Web client:** served by the server itself at `https://<your domain>/`, for
   Linux, macOS and anyone without the Windows app: chat, voice and screen sharing
   in the browser.
-- **Latency** (measured on a local network): about 60–70 ms glass to glass for
-  screen sharing at 1440p60, 2.7 ms of it for hardware encoding on an RTX 3070;
-  audio roughly 60–90 ms mouth to ear.
+- **Latency** (measured on a local network): about 50 ms glass to glass for
+  screen sharing at 1440p60 and 60 ms at 4K60 (captured, converted and encoded
+  on the GPU, about 13 % of one CPU core on an RTX 3070 system); audio roughly
+  60–90 ms mouth to ear.
 - **Not yet:** native macOS and mobile clients, federation, end-to-end encryption,
   installer and code signing, message search.
 
@@ -44,7 +45,7 @@ A Discord / TeamSpeak replacement with a focus on **low latency**.
 - Every channel has a text chat; voice and screen sharing can be enabled per channel
 - Members may create their own channels within limits set by admins (optionally temporary, like TS3)
 - File sharing in channel chats
-- Low latency audio (Opus, 10 ms frames) and screen sharing (hardware encoding, simulcast)
+- Low latency audio (Opus) and screen sharing (GPU capture and hardware encoding)
 - Self-hosting with a single `docker compose` file
 - Later: federation between servers (user ids are `name@domain` from day one) and end-to-end encryption
 

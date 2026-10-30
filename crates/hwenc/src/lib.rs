@@ -8,6 +8,8 @@
 pub mod nal;
 
 #[cfg(windows)]
+mod gpu;
+#[cfg(windows)]
 mod mf;
 
 use std::sync::Arc;
@@ -22,6 +24,28 @@ pub struct Config {
     pub height: u32,
     pub fps: u32,
     pub bitrate_bps: u32,
+}
+
+/// A monitor's area in physical pixels, relative to the top-left corner of
+/// the virtual desktop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenRect {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// The area of screen `index` (numbered like libwebrtc's screen sources:
+/// the index of an active display device; `None`: the first one).
+#[cfg(windows)]
+pub fn screen_rect(index: Option<u32>) -> Result<ScreenRect, Error> {
+    gpu::screen_rect(index)
+}
+
+#[cfg(not(windows))]
+pub fn screen_rect(_index: Option<u32>) -> Result<ScreenRect, Error> {
+    Err(Error::Unsupported)
 }
 
 /// One encoded access unit in Annex B format.
@@ -65,6 +89,8 @@ pub(crate) struct Control {
 pub struct HardwareEncoder {
     name: String,
     input: Option<SyncSender<InputFrame>>,
+    /// Only for screen capture encoders; dropped to stop them.
+    stop: Option<SyncSender<()>>,
     control: Arc<Control>,
     thread: Option<JoinHandle<()>>,
 }
@@ -105,9 +131,64 @@ impl HardwareEncoder {
         Ok(Self {
             name,
             input: Some(tx),
+            stop: None,
             control,
             thread: Some(thread),
         })
+    }
+
+    /// Captures screen `screen` (see [`screen_rect`]) and encodes it at
+    /// `config`'s size, all on the GPU: no frame passes through system
+    /// memory, and frames are taken as soon as the desktop changes.
+    /// [`HardwareEncoder::push`] is not used with such an encoder.
+    #[cfg(windows)]
+    pub fn start_screen(
+        screen: Option<u32>,
+        config: Config,
+        on_frame: impl FnMut(EncodedFrame) + Send + 'static,
+    ) -> Result<Self, Error> {
+        if config.width == 0
+            || config.height == 0
+            || !config.width.is_multiple_of(2)
+            || !config.height.is_multiple_of(2)
+        {
+            return Err(Error::InvalidSize(config.width, config.height));
+        }
+        // Nothing is sent on this channel; dropping it stops the thread.
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let control = Arc::new(Control::default());
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let thread = {
+            let control = control.clone();
+            std::thread::Builder::new()
+                .name("gpu-screen".into())
+                .spawn(move || gpu::run(screen, config, rx, control, ready_tx, on_frame))
+                .map_err(|e| Error::Platform(e.to_string()))?
+        };
+        let name = match ready_rx.recv() {
+            Ok(Ok(name)) => name,
+            Ok(Err(e)) => {
+                let _ = thread.join();
+                return Err(e);
+            }
+            Err(_) => return Err(Error::Platform("capture thread exited".into())),
+        };
+        Ok(Self {
+            name,
+            input: None,
+            stop: Some(tx),
+            control,
+            thread: Some(thread),
+        })
+    }
+
+    #[cfg(not(windows))]
+    pub fn start_screen(
+        _screen: Option<u32>,
+        _config: Config,
+        _on_frame: impl FnMut(EncodedFrame) + Send + 'static,
+    ) -> Result<Self, Error> {
+        Err(Error::Unsupported)
     }
 
     #[cfg(not(windows))]
@@ -160,6 +241,7 @@ impl Drop for HardwareEncoder {
     fn drop(&mut self) {
         // Closing the channel ends the encoder thread.
         self.input = None;
+        self.stop = None;
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }

@@ -5,10 +5,13 @@
 //!
 //! The LiveKit SDK has no hardware encoder on Windows (its NVENC support is
 //! Linux only). When the GPU offers a Media Foundation H.264 encoder (NVENC,
-//! AMF, Quick Sync), frames are converted to NV12, encoded by
-//! `tinlink-hwenc` and handed to the SDK pre-encoded. Otherwise they are
-//! converted to I420 and WebRTC encodes them in software (OpenH264) with a
-//! smaller size and frame rate.
+//! AMF, Quick Sync), `tinlink-hwenc` captures, converts and encodes the
+//! screen entirely on the GPU and the frames are handed to the SDK
+//! pre-encoded. If that pipeline cannot start (or `TINLINK_CPU_CAPTURE` is
+//! set), libwebrtc captures and the frames are converted to NV12 on the CPU
+//! for the hardware encoder. Without one they are converted to I420 and
+//! WebRTC encodes them in software (OpenH264) with a smaller size and frame
+//! rate.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -30,7 +33,7 @@ use livekit::webrtc::video_frame::{EncodedFrameType, EncodedVideoCodec, EncodedV
 use livekit::webrtc::video_source::native::NativeVideoSource;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
-use tinlink_hwenc::HardwareEncoder;
+use tinlink_hwenc::{EncodedFrame, HardwareEncoder};
 use tokio::sync::oneshot;
 
 use crate::border::ShareBorder;
@@ -231,6 +234,21 @@ fn capture_thread(
     stop: Arc<AtomicBool>,
     ready_tx: oneshot::Sender<Ready>,
 ) {
+    if std::env::var_os("TINLINK_CPU_CAPTURE").is_none() {
+        match gpu_share(source_id, settings) {
+            Ok((encoder, source, info)) => {
+                let max_bitrate = info.bitrate_bps;
+                let _ = ready_tx.send(Ok((source.clone(), info)));
+                while !stop.load(Ordering::Relaxed) {
+                    forward_requests(&encoder, &source, max_bitrate);
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                tracing::info!("screen capture stopped");
+                return;
+            }
+            Err(e) => tracing::info!("no GPU capture ({e:#}), capturing through libwebrtc"),
+        }
+    }
     let Some(mut capturer) = capturer() else {
         let _ = ready_tx.send(Err(anyhow!("screen capture is not available")));
         return;
@@ -277,6 +295,71 @@ fn capture_thread(
         }
     }
     tracing::info!("screen capture stopped");
+}
+
+/// Captures and encodes on the GPU (see `tinlink_hwenc`).
+fn gpu_share(
+    source_id: Option<u64>,
+    settings: ShareSettings,
+) -> Result<(HardwareEncoder, NativeVideoSource, ShareInfo)> {
+    let index = source_id.map(u32::try_from).transpose()?;
+    let rect = tinlink_hwenc::screen_rect(index)?;
+    let hw = plan((rect.width, rect.height), settings, true);
+    let resolution = VideoResolution {
+        width: hw.size.0,
+        height: hw.size.1,
+    };
+    let source = NativeVideoSource::new_encoded(resolution.clone());
+    let config = tinlink_hwenc::Config {
+        width: hw.size.0,
+        height: hw.size.1,
+        fps: hw.fps,
+        bitrate_bps: hw.bitrate,
+    };
+    let encoder =
+        HardwareEncoder::start_screen(index, config, encoded_sink(source.clone(), resolution))?;
+    let info = ShareInfo {
+        encoder: Some(encoder.name().to_owned()),
+        area: (rect.x, rect.y, rect.width, rect.height),
+        width: hw.size.0,
+        height: hw.size.1,
+        fps: hw.fps,
+        bitrate_bps: hw.bitrate,
+    };
+    Ok((encoder, source, info))
+}
+
+/// Hands encoded frames to the SDK.
+fn encoded_sink(
+    sink: NativeVideoSource,
+    resolution: VideoResolution,
+) -> impl FnMut(EncodedFrame) + Send + 'static {
+    move |frame| {
+        sink.capture_encoded_frame(&EncodedVideoFrame {
+            codec: EncodedVideoCodec::H264,
+            payload: &frame.data,
+            // 0: stamped by the SDK when the encoded frame arrives.
+            timestamp_us: 0,
+            frame_type: if frame.keyframe {
+                EncodedFrameType::Key
+            } else {
+                EncodedFrameType::Delta
+            },
+            resolution: resolution.clone(),
+            frame_metadata: None,
+        });
+    }
+}
+
+/// Passes keyframe and bitrate requests from WebRTC to the encoder.
+fn forward_requests(encoder: &HardwareEncoder, source: &NativeVideoSource, max_bitrate: u32) {
+    if source.take_keyframe_request() {
+        encoder.request_keyframe();
+    }
+    if let Some(rate) = source.take_rate_control_request() {
+        let bps = rate.target_bitrate_bps.min(u64::from(max_bitrate));
+        encoder.set_bitrate(bps as u32);
+    }
 }
 
 /// Where converted frames go, decided on the first frame.
@@ -351,13 +434,7 @@ impl FrameSink {
                 size,
                 max_bitrate,
             }) => {
-                if source.take_keyframe_request() {
-                    encoder.request_keyframe();
-                }
-                if let Some(rate) = source.take_rate_control_request() {
-                    let bps = rate.target_bitrate_bps.min(u64::from(*max_bitrate));
-                    encoder.set_bitrate(bps as u32);
-                }
+                forward_requests(encoder, source, *max_bitrate);
                 let nv12 = to_nv12(&frame, input, *size);
                 encoder.push(nv12, self.epoch.elapsed().as_micros() as i64);
             }
@@ -384,28 +461,13 @@ impl FrameSink {
             height: size.1,
         };
         let source = NativeVideoSource::new_encoded(resolution.clone());
-        let sink = source.clone();
         let config = tinlink_hwenc::Config {
             width: size.0,
             height: size.1,
             fps: hw.fps,
             bitrate_bps: hw.bitrate,
         };
-        let started = HardwareEncoder::start(config, move |frame| {
-            sink.capture_encoded_frame(&EncodedVideoFrame {
-                codec: EncodedVideoCodec::H264,
-                payload: &frame.data,
-                // 0: stamped by the SDK when the encoded frame arrives.
-                timestamp_us: 0,
-                frame_type: if frame.keyframe {
-                    EncodedFrameType::Key
-                } else {
-                    EncodedFrameType::Delta
-                },
-                resolution: resolution.clone(),
-                frame_metadata: None,
-            });
-        });
+        let started = HardwareEncoder::start(config, encoded_sink(source.clone(), resolution));
         let (output, info) = match started {
             Ok(encoder) => {
                 self.fps.store(hw.fps, Ordering::Relaxed);
