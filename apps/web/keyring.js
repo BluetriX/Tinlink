@@ -52,12 +52,15 @@ export function createKeyring({ api, userId, onWarning = () => {} }) {
   let device = null; // { id, signSeed, dhPrivate, signPublic, dhPublic }
   let identitySeed = null;
   let approved = false;
+  let resetting = false; // own devices are revoked on purpose meanwhile
   const channelKeys = new Map(); // channel id -> Map(epoch -> key bytes)
   const pinned = new Map(); // user id -> identity key (base64), remembered first sight
+  const formerPins = new Map(); // user id -> identity keys trusted before the pinned one
 
   async function save() {
     record.identitySeed = identitySeed ? b64e(identitySeed) : null;
     record.pinned = Object.fromEntries(pinned);
+    record.formerPins = Object.fromEntries(formerPins);
     await store.set(recordKey, record);
   }
 
@@ -65,20 +68,41 @@ export function createKeyring({ api, userId, onWarning = () => {} }) {
     return e2ee.sign(identitySeed, e2ee.certificatePayload(userId, id, kind, signKey, dhKey));
   }
 
-  /** Checks a user's keys from the server; returns their approved devices. */
+  /**
+   * Whether a device certified by an earlier identity key of a user may
+   * still vouch for what it signed back then: the key was trusted here
+   * before, or this client never saw the user's key change (first sight).
+   */
+  function trustsFormer(userId, key) {
+    const former = formerPins.get(userId) || [];
+    return key === pinned.get(userId) || former.includes(key) || !former.length;
+  }
+
+  /**
+   * Checks a user's keys from the server; returns their approved devices.
+   * Revoked ones (`former: true`) come along for checking old signatures
+   * only; they never receive keys.
+   */
   async function verifiedDevices(user) {
-    if (!user.identity_key) return [];
+    const out = [];
+    if (!user.identity_key) return out;
     const pin = pinned.get(user.user_id);
-    if (pin && pin !== user.identity_key) {
-      onWarning(user.user_id);
-      return [];
-    }
+    const current = !pin || pin === user.identity_key;
+    if (!current) onWarning(user.user_id);
     if (!pin) {
       pinned.set(user.user_id, user.identity_key);
       await save();
     }
+    for (const d of user.former_devices || []) {
+      if (!trustsFormer(user.user_id, d.identity_key)) continue;
+      const signKey = b64d(d.sign_key);
+      const payload = e2ee.certificatePayload(user.user_id, d.id, "device", signKey, b64d(d.dh_key));
+      if (await e2ee.verify(b64d(d.identity_key), payload, b64d(d.certificate))) {
+        out.push({ id: d.id, userId: user.user_id, kind: "device", signKey, former: true });
+      }
+    }
+    if (!current) return out;
     const identity = b64d(user.identity_key);
-    const out = [];
     for (const d of user.devices) {
       if (!d.certificate) continue;
       const signKey = d.sign_key ? b64d(d.sign_key) : null;
@@ -113,6 +137,7 @@ export function createKeyring({ api, userId, onWarning = () => {} }) {
     device.dhPublic = await e2ee.dhPublic(device.dhPrivate);
     identitySeed = record.identitySeed ? b64d(record.identitySeed) : null;
     for (const [id, key] of Object.entries(record.pinned || {})) pinned.set(id, key);
+    for (const [id, keys] of Object.entries(record.formerPins || {})) formerPins.set(id, keys);
 
     if (!record.registered) {
       await api("POST", "/devices", {
@@ -129,6 +154,7 @@ export function createKeyring({ api, userId, onWarning = () => {} }) {
 
   /** Re-reads whether this device is approved. */
   async function refresh() {
+    if (resetting) return "resetting";
     const me = await api("GET", `/users/${userId}/keys`);
     const mine = me.devices.find((d) => d.id === device.id);
     if (!mine) {
@@ -139,19 +165,33 @@ export function createKeyring({ api, userId, onWarning = () => {} }) {
     }
     if (!me.identity_key) return "new_identity";
     pinned.set(userId, me.identity_key);
-    approved = (await verifiedDevices(me)).some((d) => d.id === device.id);
+    approved = (await verifiedDevices(me)).some((d) => d.id === device.id && !d.former);
     return approved ? "ready" : "pending";
   }
 
   /** Creates the account's identity and recovery key; returns the recovery key text. */
-  async function createIdentity() {
-    identitySeed = e2ee.randomKey();
+  async function createIdentity({ reset = false, deviceName = "" } = {}) {
+    const seed = e2ee.randomKey();
     const recovery = e2ee.randomKey();
-    const identityKey = await e2ee.signingPublic(identitySeed);
-    await api("PUT", "/users/me/identity", {
-      identity_key: b64e(identityKey),
-      identity_backup: b64e(await e2ee.sealIdentityBackup(recovery, userId, identitySeed)),
-    });
+    const identityKey = await e2ee.signingPublic(seed);
+    // A reset revokes every device of the account, this one too; the
+    // notice about that must not start over meanwhile.
+    resetting = reset;
+    try {
+      await api("PUT", "/users/me/identity", {
+        identity_key: b64e(identityKey),
+        identity_backup: b64e(await e2ee.sealIdentityBackup(recovery, userId, seed)),
+        reset,
+      });
+      if (reset) {
+        await store.set(recordKey, null);
+        await setup(deviceName);
+        userDevices.delete(userId);
+      }
+    } finally {
+      resetting = false;
+    }
+    identitySeed = seed;
     pinned.set(userId, b64e(identityKey));
     const cert = await certify(device.id, "device", device.signPublic, device.dhPublic);
     await api("PUT", `/devices/${device.id}/certificate`, { certificate: b64e(cert) });
@@ -231,20 +271,27 @@ export function createKeyring({ api, userId, onWarning = () => {} }) {
     return byId;
   }
 
-  /** Fetches the keys of a channel; returns { epoch, rotate }. */
-  async function load(channelId) {
-    const res = await api("GET", `/channels/${channelId}/keys?device=${device.id}`);
-    const senders = await readerDevices(channelId);
-    // Senders that lost access later still signed valid keys back then.
-    for (const k of res.keys) {
+  /** Devices that signed `keys`: the readers, plus earlier readers and revoked devices. */
+  async function sendersOf(keys, readers) {
+    const senders = new Map(readers);
+    for (const k of keys) {
       if (!senders.has(k.sender_id)) {
+        // Senders that lost access later still signed valid keys back then.
         const u = await api("GET", `/users/${k.sender_user_id}/keys`).catch(() => null);
         for (const d of u ? await verifiedDevices(u) : []) senders.set(d.id, d);
       }
     }
+    return senders;
+  }
+
+  /** Fetches the keys of a channel; returns { epoch, rotate }. */
+  async function load(channelId) {
+    const res = await api("GET", `/channels/${channelId}/keys?device=${device.id}`);
+    const readers = await readerDevices(channelId);
+    const senders = await sendersOf(res.keys, readers);
     const keys = await openKeys(channelId, device.id, device.dhPrivate, res.keys, senders);
     channelKeys.set(channelId, new Map([...(channelKeys.get(channelId) || []), ...keys]));
-    return { epoch: res.epoch, rotate: res.rotate, readers: senders };
+    return { epoch: res.epoch, rotate: res.rotate, readers };
   }
 
   /** Wraps a key to devices and stores it as `epoch`. */
@@ -321,7 +368,7 @@ export function createKeyring({ api, userId, onWarning = () => {} }) {
   async function adoptBackupKeys(channelId) {
     const res = await api("GET", `/channels/${channelId}/keys?device=${record.backupId}`).catch(() => null);
     if (!res?.keys.length) return;
-    const senders = await readerDevices(channelId);
+    const senders = await sendersOf(res.keys, await readerDevices(channelId));
     const keys = await openKeys(channelId, record.backupId, b64d(record.backupDhPrivate), res.keys, senders);
     const mine = channelKeys.get(channelId) || new Map();
     const fresh = [...keys].filter(([epoch]) => !mine.has(epoch));
@@ -381,6 +428,24 @@ export function createKeyring({ api, userId, onWarning = () => {} }) {
   return {
     setup, refresh, createIdentity, useRecoveryKey, pendingDevices, approveDevice,
     current, known, load, shareMissing, encrypt, decrypt,
+    /**
+     * Accepts the current identity key of a user whose key changed, after
+     * the user confirmed the reset in person.
+     */
+    async trust(otherId) {
+      const u = await api("GET", `/users/${otherId}/keys`);
+      const old = pinned.get(otherId);
+      if (!u.identity_key || old === u.identity_key) return;
+      if (old) formerPins.set(otherId, [...(formerPins.get(otherId) || []), old]);
+      pinned.set(otherId, u.identity_key);
+      userDevices.delete(otherId);
+      await save();
+    },
+    /** Whether the key of a user changed since this client trusted it. */
+    async changed(otherId) {
+      const u = await api("GET", `/users/${otherId}/keys`);
+      return !!u.identity_key && pinned.has(otherId) && pinned.get(otherId) !== u.identity_key;
+    },
     /** Forgets cached devices of a user whose keys changed. */
     forget(userId) {
       userDevices.delete(userId);

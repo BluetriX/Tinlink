@@ -150,7 +150,7 @@ const state = {
  * Shows a small form. `fields`: [{ id, label, type, value, placeholder }].
  * `submit(values)` may return an error string to keep the dialog open.
  */
-function ask({ title, fields = [], text, ok = "OK", cancel = true, submit }) {
+function ask({ title, fields = [], text, ok = "OK", cancel = true, extra, submit }) {
   return new Promise((resolve) => {
     const dialog = $("dialog");
     $("dialog-title").textContent = title;
@@ -176,6 +176,7 @@ function ask({ title, fields = [], text, ok = "OK", cancel = true, submit }) {
         ? el("label", { class: "inline" }, input, ` ${f.label}`)
         : el("label", {}, f.label, input));
     }
+    if (extra) body.append(el("p", {}, extra));
     const finish = (result) => {
       dialog.close();
       $("dialog-form").onsubmit = null;
@@ -310,8 +311,7 @@ async function setupEncryption() {
   const keyring = createKeyring({
     api: keyringApi,
     userId: myId(),
-    onWarning: (userId) => setStatus(
-      `The security key of ${displayNameOf(userId, "a member")} changed. Their devices get no keys until you check this with them.`, true),
+    onWarning: (userId) => keyChanged(userId),
   });
   state.keyring = keyring;
   try {
@@ -351,6 +351,7 @@ async function showRecoveryKey(text) {
 async function approveThisDevice() {
   const keyring = state.keyring;
   const code = await keyring.code();
+  let lost = false;
   await ask({
     title: "Approve this device",
     text: el("div", {},
@@ -358,17 +359,75 @@ async function approveThisDevice() {
       el("p", {}, el("code", { class: "code", textContent: code }))),
     fields: [{ id: "recovery", label: "Recovery key", placeholder: "XXXX XXXX …" }],
     ok: "Approve",
+    extra: el("button", {
+      type: "button", class: "link small", textContent: "Lost your recovery key?",
+      onclick: () => {
+        lost = true;
+        $("dialog-cancel").click();
+      },
+    }),
     submit: (v) => {
       if (keyring.approved) return null;
       if (!v.recovery) return "Enter the recovery key, or approve on another device.";
       return tryText(() => keyring.useRecoveryKey(v.recovery));
     },
   });
+  if (lost && !keyring.approved) return resetEncryption();
   if (keyring.approved) {
     setStatus("This device is approved for encryption");
     shareKeysSoon();
     reopenLocked();
   }
+}
+
+/** Starts over with a new identity and recovery key after losing the old one. */
+async function resetEncryption() {
+  const keyring = state.keyring;
+  const yes = await ask({
+    title: "Reset encryption?",
+    text: el("div", {},
+      el("p", { textContent: "Without the recovery key and without another approved device, your encrypted history cannot be opened anymore; nobody can recover it." }),
+      el("p", { textContent: "A reset gives you a new recovery key. Your other devices and browsers need approval again, and members see that your security key changed until they confirm it. They can share older channel keys with you again afterwards." })),
+    fields: [{ id: "sure", label: "I have neither my recovery key nor an approved device", type: "checkbox" }],
+    ok: "Reset",
+    submit: (v) => (v.sure ? null : "Please confirm first."),
+  });
+  if (!yes) return approveThisDevice();
+  const text = await run(() => keyring.createIdentity({ reset: true, deviceName: "Tinlink desktop on Windows" }));
+  if (!text) return;
+  await showRecoveryKey(text);
+  setStatus("Encryption was reset; this device is approved");
+  shareKeysSoon();
+  reopenLocked();
+}
+
+/** Users whose changed key was already asked about in this session. */
+const keyChangesAsked = new Set();
+
+/** Asks whether to trust the new key of a user who reset their encryption. */
+async function keyChanged(userId) {
+  if (keyChangesAsked.has(userId)) return;
+  keyChangesAsked.add(userId);
+  while ($("dialog").open) await new Promise((r) => setTimeout(r, 1000));
+  const name = displayNameOf(userId, "A member");
+  const yes = await ask({
+    title: "Security key changed",
+    text: el("div", {},
+      el("p", { textContent: `${name} has a new security key. That happens when they reset their encryption after losing their recovery key, but also when someone tampers with the server.` }),
+      el("p", { textContent: "Ask them in person, by phone or another way whether they reset it. Until you confirm, their new devices get no keys from you." })),
+    ok: "They reset it, trust the new key",
+    cancel: true,
+  });
+  if (!yes) {
+    setStatus(`The security key of ${name} changed; Tinlink asks again next time.`, true);
+    return;
+  }
+  await run(async () => {
+    await state.keyring.trust(userId);
+    setStatus(`Trusting the new security key of ${name}`);
+    shareKeysSoon();
+    reopenLocked();
+  });
 }
 
 /** Offers to approve own devices that wait for it. */

@@ -147,6 +147,18 @@ pub struct UserKeys {
     /// Active devices. Others only see certified ones; the user also sees
     /// devices waiting for approval.
     pub devices: Vec<DeviceInfo>,
+    /// Revoked devices with the identity key that had certified them, so
+    /// what they signed stays checkable. Only in `GET /users/{id}/keys`.
+    pub former_devices: Vec<FormerDevice>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct FormerDevice {
+    pub id: Uuid,
+    pub sign_key: Bytes,
+    pub dh_key: Bytes,
+    pub certificate: Bytes,
+    pub identity_key: Bytes,
 }
 
 /// A user's identity key and devices. Visible to the user and to everyone
@@ -172,7 +184,17 @@ pub async fn user_keys(
             return Err(AppError::NotFound);
         }
     }
-    Ok(Json(load_user_keys(&state, user_id, is_self).await?))
+    let mut keys = load_user_keys(&state, user_id, is_self).await?;
+    keys.former_devices = sqlx::query_as(
+        "SELECT id, sign_key, dh_key, certificate, identity_key FROM devices
+         WHERE user_id = $1 AND revoked_at IS NOT NULL AND kind = 'device'
+           AND sign_key IS NOT NULL AND certificate IS NOT NULL AND identity_key IS NOT NULL
+         ORDER BY created_at",
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(keys))
 }
 
 /// A user's identity key and active devices; pending ones only with
@@ -201,6 +223,7 @@ async fn load_user_keys(
         user_id,
         identity_key,
         devices,
+        former_devices: Vec::new(),
     })
 }
 
@@ -250,8 +273,9 @@ pub async fn create_device(
         check_len("certificate", cert, SIGNATURE_LEN)?;
     }
     sqlx::query(
-        "INSERT INTO devices (id, user_id, kind, name, sign_key, dh_key, certificate)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        "INSERT INTO devices (id, user_id, kind, name, sign_key, dh_key, certificate, identity_key)
+         SELECT $1, $2, $3, $4, $5, $6, $7, CASE WHEN $7 IS NULL THEN NULL ELSE identity_key END
+         FROM users WHERE id = $2",
     )
     .bind(req.id)
     .bind(user.id)
@@ -280,7 +304,8 @@ pub async fn certify_device(
 ) -> AppResult<StatusCode> {
     check_len("certificate", &req.certificate, SIGNATURE_LEN)?;
     let updated = sqlx::query(
-        "UPDATE devices SET certificate = $3
+        "UPDATE devices SET certificate = $3,
+                identity_key = (SELECT identity_key FROM users WHERE id = $2)
          WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
     )
     .bind(device_id)

@@ -69,6 +69,22 @@ The backup key is registered as a device of kind `backup`. Every device
 shares channel keys with it like with any other device, so the recovery key
 alone restores the identity and the whole history.
 
+### Losing the recovery key
+
+A user without the recovery key and without an approved device can reset:
+a new identity key and recovery key replace the old ones and every device of
+the user is revoked. The server keeps the identity key that certified each
+device, and `GET /users/{id}/keys` lists revoked devices under
+`former_devices`, so messages and channel keys they signed stay checkable.
+A client accepts a former device if its certifying key is the pinned key of
+the user, one pinned before it, or if this client never saw that user's key
+change.
+
+Other members see that the user's key changed and get nothing from their
+devices until they confirm the new key (asked in person). Then the old key
+moves to the client's list of former keys and their devices share older
+channel keys with the user's new devices again.
+
 ## Channel keys
 
 A channel (group channel or direct message) has numbered epochs, starting at

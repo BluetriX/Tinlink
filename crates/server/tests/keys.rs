@@ -44,6 +44,14 @@ async fn identity_key_is_set_once(db: PgPool) {
         .put("/api/users/me/identity", &alice, set(7, false))
         .await;
     assert_eq!(res.status, StatusCode::NO_CONTENT, "{:?}", res.body);
+    let res = app
+        .put(
+            &format!("/api/devices/{device}/certificate"),
+            &alice,
+            json!({ "certificate": bytes(6, 64) }),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::NO_CONTENT);
     // The same key again only updates the backup.
     let res = app
         .put("/api/users/me/identity", &alice, set(7, false))
@@ -69,6 +77,12 @@ async fn identity_key_is_set_once(db: PgPool) {
         .await;
     assert_eq!(keys.body["identity_key"], bytes(8, 32));
     assert_eq!(keys.body["devices"], json!([]));
+    // What the revoked device signed stays checkable with the old key.
+    let former = &keys.body["former_devices"];
+    assert_eq!(former.as_array().unwrap().len(), 1, "{former:?}");
+    assert_eq!(former[0]["id"], device.as_str());
+    assert_eq!(former[0]["identity_key"], bytes(7, 32));
+    assert_eq!(former[0]["certificate"], bytes(6, 64));
     let res = app.delete(&format!("/api/devices/{device}"), &alice).await;
     assert_eq!(res.status, StatusCode::NOT_FOUND);
 }
