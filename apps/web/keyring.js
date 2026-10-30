@@ -329,9 +329,62 @@ export function createKeyring({ api, userId, onWarning = () => {} }) {
     for (const [epoch, key] of fresh) await send(channelId, epoch, key, [{ ...device, dhKey: device.dhPublic }]).catch(() => {});
   }
 
+  // Verified devices per user, for checking who signed a message.
+  const userDevices = new Map(); // user id -> Promise<Map(device id -> device)>
+
+  function devicesOf(userId) {
+    if (!userDevices.has(userId)) {
+      const p = api("GET", `/users/${userId}/keys`)
+        .then(async (u) => new Map((await verifiedDevices(u)).map((d) => [d.id, d])))
+        .catch((e) => {
+          userDevices.delete(userId);
+          throw e;
+        });
+      userDevices.set(userId, p);
+    }
+    return userDevices.get(userId);
+  }
+
+  /** Encrypts a message body ({ text }) for a channel; returns the post fields. */
+  async function encrypt(channelId, message) {
+    const { epoch, key } = await current(channelId);
+    const content = await e2ee.sealMessage({
+      channelId, epoch, deviceId: device.id, signSeed: device.signSeed, channelKey: key,
+      plaintext: new TextEncoder().encode(JSON.stringify(message)),
+    });
+    return { content, encrypted: true };
+  }
+
+  /**
+   * Opens a message of `authorId`; returns its body ({ text }). Throws when
+   * the key has not reached this device yet or the message does not verify.
+   */
+  async function decrypt(channelId, authorId, content) {
+    const envelope = e2ee.parseEnvelope(content);
+    let key = channelKeys.get(channelId)?.get(envelope.epoch);
+    if (!key && approved) {
+      await load(channelId);
+      key = channelKeys.get(channelId)?.get(envelope.epoch);
+    }
+    if (!key) throw new Error("missing key");
+    let sender = authorId ? (await devicesOf(authorId)).get(envelope.deviceId) : null;
+    if (!sender && authorId) {
+      // A device added since we last looked.
+      userDevices.delete(authorId);
+      sender = (await devicesOf(authorId)).get(envelope.deviceId);
+    }
+    if (!sender?.signKey) throw new Error("unknown sender device");
+    const plaintext = await e2ee.openMessage({ channelId, envelope, channelKey: key, signKey: sender.signKey });
+    return JSON.parse(new TextDecoder().decode(plaintext));
+  }
+
   return {
     setup, refresh, createIdentity, useRecoveryKey, pendingDevices, approveDevice,
-    current, known, load, shareMissing,
+    current, known, load, shareMissing, encrypt, decrypt,
+    /** Forgets cached devices of a user whose keys changed. */
+    forget(userId) {
+      userDevices.delete(userId);
+    },
     get approved() {
       return approved;
     },

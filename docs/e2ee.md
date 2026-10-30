@@ -3,9 +3,9 @@
 Status: the server stores keys; the web and the desktop client set up
 devices, the recovery key and channel keys, and can encrypt voice, webcams
 and screen shares with channel keys (opt-in in the voice settings for now).
-The desktop UI runs the web client's `e2ee.js` and `keyring.js` (copied by
-its build script) and hands only the derived media keys to the Rust core.
-Messages and files are not encrypted yet.
+The web client encrypts every new message. The desktop UI runs the web
+client's `e2ee.js` and `keyring.js` (copied by its build script) and hands
+only the derived media keys to the Rust core. Files are not encrypted yet.
 
 The server stores public keys and wrapped channel keys and decides who may
 fetch them. It never sees a private key, a channel key, a message or a media
@@ -106,6 +106,24 @@ the media key of the newest epoch, passed to both SDKs as the base64 string
 of `media_key` (both run PBKDF2 over a string key the same way) at key index
 `epoch mod 16`, so frames of the previous epoch still decrypt while everyone
 switches.
+
+### Messages
+
+A message with `encrypted: true` carries in `content` the base64 of
+
+```
+envelope  = version(1) = 1 || epoch || sender_device_id(16) || nonce(12) || ciphertext || signature(64)
+ciphertext = AES-256-GCM(message_key, nonce, plaintext,
+                         aad = "tinlink-message-v1" || channel_id || epoch || sender_device_id)
+signature = Ed25519-Sign(sender_sign_key, "tinlink-message-v1" || channel_id || body)
+```
+
+where `body` is the envelope without the signature and `plaintext` is the
+JSON `{"text": "..."}` (more fields may follow, readers ignore unknown ones).
+A reader accepts a message only if the device belongs to the message's
+author and carries a valid certificate. Edits are new envelopes; older
+messages without `encrypted` stay plain text. Mentions are sent as
+`mentions: [user_id]` next to the envelope.
 
 ## Server API
 

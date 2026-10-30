@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import {
   CHANNEL_PERMISSIONS, Gate, cameraGrid, cameraSize, MutedSpeechDetector, SpeakingTracker, TypingTracker, can, canEditRole, formatPerms, memberPosition,
   overwriteState, parsePerms, roleColor, setOverwriteState, highlightRanges, searchTerms, inputName, isUnread, mentionCandidates, mentionQuery, shareBitrate,
-  shareSize, sortMembers, typingText,
+  shareSize, sortMembers, typingText, mentionedNames,
 } from "../logic.js";
 
 test("permissions", () => {
@@ -187,4 +187,10 @@ test("webcam grid stays close to square", () => {
   assert.deepEqual(cameraGrid(10), { cols: 4, rows: 3 });
   assert.deepEqual(cameraSize(360), [640, 360]);
   assert.deepEqual(cameraSize(undefined), [1280, 720]);
+});
+
+test("mentioned names match the server", () => {
+  assert.deepEqual(mentionedNames("hi @Alice and @bob. mail a@b.de, @alice again"), ["alice", "bob"]);
+  assert.deepEqual(mentionedNames("@x-"), ["x"]);
+  assert.deepEqual(mentionedNames("no mention @"), []);
 });

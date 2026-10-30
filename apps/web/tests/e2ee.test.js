@@ -58,3 +58,23 @@ test("channel keys", async () => {
   same(await e2ee.mediaKey(hex(v.channel_key), v.channel_id), v.media_key);
   assert.equal(e2ee.mediaKeyIndex(v.epoch), v.media_key_index);
 });
+
+test("messages", async () => {
+  const plaintext = new TextEncoder().encode(JSON.stringify({ text: "Hallo 👋" }));
+  const content = await e2ee.sealMessage({
+    channelId: v.channel_id, epoch: v.epoch, deviceId: v.device_id,
+    signSeed: hex(v.device_sign_seed), channelKey: hex(v.channel_key), plaintext,
+  });
+  const envelope = e2ee.parseEnvelope(content);
+  assert.equal(envelope.epoch, v.epoch);
+  assert.equal(envelope.deviceId, v.device_id);
+  const opened = await e2ee.openMessage({ channelId: v.channel_id, envelope, channelKey: hex(v.channel_key), signKey: hex(v.device_sign_public) });
+  assert.deepEqual(opened, plaintext);
+  // Another channel, another signer or a flipped bit: refused.
+  await assert.rejects(e2ee.openMessage({ channelId: v.user_id, envelope, channelKey: hex(v.channel_key), signKey: hex(v.device_sign_public) }));
+  await assert.rejects(e2ee.openMessage({ channelId: v.channel_id, envelope, channelKey: hex(v.channel_key), signKey: hex(v.identity_public) }));
+  const raw = e2ee.fromBase64(content);
+  raw[40] ^= 1;
+  await assert.rejects(e2ee.openMessage({ channelId: v.channel_id, envelope: e2ee.parseEnvelope(e2ee.toBase64(raw)), channelKey: hex(v.channel_key), signKey: hex(v.device_sign_public) }));
+  assert.throws(() => e2ee.parseEnvelope("AAAA"));
+});

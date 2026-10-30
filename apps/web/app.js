@@ -3,7 +3,7 @@
 import {
   COMPRESSORS, Gate, MutedSpeechDetector, SpeakingTracker, TypingTracker, can, cameraGrid, cameraSize, highlightRanges, searchTerms, inputName, isUnread,
   mentionCandidates, mentionQuery, shareBitrate,
-  shareSize, sortMembers, typingText,
+  shareSize, sortMembers, typingText, mentionedNames,
 } from "./logic.js";
 import { createSettings, hasSettings } from "./admin.js";
 import { avatar, chooseAndUpload, imageUrl, initials } from "./images.js";
@@ -717,6 +717,8 @@ async function loadMessages(before) {
   const query = before ? `?limit=50&before=${before}` : "?limit=50";
   const page = await run(() => api("GET", `/channels/${ch.id}/messages${query}`));
   if (!page || state.channel !== ch) return;
+  await Promise.all(page.map(openMessage));
+  if (state.channel !== ch) return;
   if (page.length < 50) state.noOlder = true;
   page.reverse();
   const box = $("messages");
@@ -772,7 +774,8 @@ function renderMessage(m) {
         el("strong", { textContent: author.display_name || m.author_name || "deleted user" }),
         el("span", { textContent: formatTime(m.created_at) + (m.edited_at ? " (edited)" : "") }),
         actions),
-      m.content ? el("div", { class: "text", textContent: m.content }) : null,
+      m.locked ? el("div", { class: "text muted", textContent: "Encrypted message; its key has not reached this browser yet." })
+        : m.content ? el("div", { class: "text", textContent: m.content }) : null,
       ...(m.attachments || []).map(renderAttachment)));
 }
 
@@ -791,7 +794,8 @@ async function editMessage(m) {
     submit: (v) => {
       if (!v.content) return "A message cannot be empty; delete it instead.";
       return tryText(async () => {
-        replaceMessage(await api("PATCH", `/channels/${m.channel_id}/messages/${m.id}`, { content: v.content }));
+        const body = await outgoing(m.channel_id, v.content);
+        replaceMessage(await openMessage(await api("PATCH", `/channels/${m.channel_id}/messages/${m.id}`, body)));
       });
     },
   });
@@ -898,7 +902,8 @@ $("composer").addEventListener("submit", async (ev) => {
       const info = await request("POST", `/channels/${ch.id}/attachments`, form, true);
       ids.push(info.id);
     }
-    const message = await api("POST", `/channels/${ch.id}/messages`, { content, attachment_ids: ids });
+    const body = await outgoing(ch.id, content);
+    const message = await openMessage(await api("POST", `/channels/${ch.id}/messages`, { ...body, attachment_ids: ids }));
     state.pendingFiles = [];
     renderPending();
     $("message-input").value = "";
@@ -1005,8 +1010,10 @@ async function runSearch(query, more = false) {
   const page = await run(() => api("GET", `/search?${params}`));
   if (!page) return;
   search.query = query;
-  search.hits = more ? [...search.hits, ...page] : page;
   const terms = searchTerms(query);
+  // The server cannot search encrypted messages; add the loaded ones that match.
+  if (!more) page.unshift(...localHits(terms).filter((h) => !page.some((p) => p.id === h.id)));
+  search.hits = more ? [...search.hits, ...page] : page;
   const hits = page.map((h) => renderHit(h, terms));
   if (more) $("search-hits").append(...hits);
   else $("search-hits").replaceChildren(...hits);
@@ -1029,6 +1036,17 @@ function highlighted(text, terms) {
   }
   nodes.push(text.slice(pos));
   return nodes;
+}
+
+/** Opened encrypted messages of the open channel that contain every term. */
+function localHits(terms) {
+  const ch = state.channel;
+  if (!ch || !terms.length) return [];
+  const dm = state.dms.find((d) => d.id === ch.id);
+  return state.messages
+    .filter((m) => m.encrypted && !m.locked && terms.every((t) => m.content.toLowerCase().includes(t)))
+    .reverse()
+    .map((m) => ({ ...m, group_id: dm ? null : ch.group_id, channel_name: dm ? dm.user.display_name : ch.name }));
 }
 
 function renderHit(h, terms) {
@@ -1393,10 +1411,10 @@ function onGatewayEvent(e) {
   const inGroup = state.group && e.group_id === state.group.id;
   switch (e.type) {
     case "message_created":
-      onMessageCreated(e);
+      openMessage(e.data).then(() => onMessageCreated(e));
       break;
     case "message_updated":
-      replaceMessage(e.data);
+      openMessage(e.data).then(replaceMessage);
       break;
     case "message_deleted":
       removeMessage(e.data.id);
@@ -1480,6 +1498,43 @@ function browserName() {
   return os ? `${browser} on ${os}` : browser;
 }
 
+/**
+ * The post fields of a message: encrypted with the channel key and with the
+ * mentioned users named, since the server cannot read them.
+ */
+async function outgoing(channelId, content) {
+  if (!state.keyring?.approved) throw new Error("Approve this browser for encryption first (click your name).");
+  const names = mentionedNames(content);
+  const users = [...state.members.values(), ...state.dms.map((d) => d.user)];
+  const mentions = [...new Set(users.filter((u) => names.includes(u.name?.toLowerCase())).map((u) => u.id ?? u.user_id))];
+  return { ...(await state.keyring.encrypt(channelId, { text: content })), mentions };
+}
+
+/** Decrypts an encrypted message in place; marks it locked without a key. */
+async function openMessage(m) {
+  if (!m?.encrypted || m.opened) return m;
+  m.envelope ??= m.content;
+  try {
+    if (!state.keyring) throw new Error("no keys");
+    const body = await state.keyring.decrypt(m.channel_id, m.author_id, m.envelope);
+    m.content = typeof body.text === "string" ? body.text : "";
+    m.opened = true;
+    m.locked = false;
+  } catch {
+    m.content = "";
+    m.locked = true;
+  }
+  return m;
+}
+
+/** Tries locked messages of the open channel again, e.g. after keys arrived. */
+async function reopenLocked() {
+  for (const m of state.messages.filter((x) => x.locked)) {
+    await openMessage(m);
+    if (!m.locked) replaceMessage(m);
+  }
+}
+
 /** Sets up this browser's keys after login; asks for what is missing. */
 async function setupEncryption() {
   if (!crypto.subtle) return;
@@ -1540,6 +1595,7 @@ async function approveThisBrowser() {
   if (keyring.approved) {
     setStatus("This browser is approved for encryption");
     shareKeysSoon();
+    reopenLocked();
   }
 }
 
@@ -1567,6 +1623,7 @@ async function approvePendingDevices({ explicit = false } = {}) {
 async function onKeysChanged(userId) {
   const keyring = state.keyring;
   if (!keyring) return;
+  keyring.forget(userId);
   if (userId === state.session?.user.id) {
     const wasApproved = keyring.approved;
     const status = await keyring.refresh().catch(() => null);
@@ -1588,6 +1645,7 @@ async function onChannelKeysAdded(channelId) {
       await applyMediaKeys(channelId, voice.mediaKeys);
     });
   }
+  if (state.channel?.id === channelId) reopenLocked();
   shareKeysSoon();
 }
 

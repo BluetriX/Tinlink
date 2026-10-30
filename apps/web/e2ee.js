@@ -279,4 +279,53 @@ export function decodeRecoveryKey(input) {
   return new Uint8Array(out);
 }
 
+// --- Messages.
+
+const MESSAGE_LABEL = "tinlink-message-v1";
+
+export function uuidString(bytes) {
+  const h = toHex(bytes);
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+/**
+ * Encrypts and signs a message (UTF-8 bytes) with a channel key epoch; returns
+ * the base64 envelope stored as the message content.
+ */
+export async function sealMessage({ channelId, epoch, deviceId, signSeed, channelKey, plaintext }) {
+  const key = await subtle.importKey("raw", await messageKey(channelKey, channelId), "AES-GCM", false, ["encrypt"]);
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const header = concat(new Uint8Array([1]), u32(epoch), uuidBytes(deviceId));
+  const aad = concat(text(MESSAGE_LABEL), uuidBytes(channelId), header.subarray(1));
+  const ct = new Uint8Array(await subtle.encrypt({ name: "AES-GCM", iv: nonce, additionalData: aad }, key, plaintext));
+  const body = concat(header, nonce, ct);
+  const signature = await sign(signSeed, concat(text(MESSAGE_LABEL), uuidBytes(channelId), body));
+  return toBase64(concat(body, signature));
+}
+
+/** Splits an envelope; throws when it is malformed. */
+export function parseEnvelope(content) {
+  const raw = fromBase64(content);
+  if (raw.length < 1 + 4 + 16 + 12 + 16 + 64 || raw[0] !== 1) throw new Error("unknown message format");
+  const body = raw.subarray(0, raw.length - 64);
+  return {
+    epoch: new DataView(raw.buffer, raw.byteOffset + 1, 4).getUint32(0),
+    deviceId: uuidString(raw.subarray(5, 21)),
+    body,
+    signature: raw.subarray(raw.length - 64),
+  };
+}
+
+/** Checks the sender's signature and decrypts; throws if either fails. */
+export async function openMessage({ channelId, envelope, channelKey, signKey }) {
+  const { body, signature } = envelope;
+  if (!(await verify(signKey, concat(text(MESSAGE_LABEL), uuidBytes(channelId), body), signature))) {
+    throw new Error("invalid message signature");
+  }
+  const key = await subtle.importKey("raw", await messageKey(channelKey, channelId), "AES-GCM", false, ["decrypt"]);
+  const aad = concat(text(MESSAGE_LABEL), uuidBytes(channelId), body.subarray(1, 21));
+  const pt = await subtle.decrypt({ name: "AES-GCM", iv: body.subarray(21, 33), additionalData: aad }, key, body.subarray(33));
+  return new Uint8Array(pt);
+}
+
 export { equal as bytesEqual };

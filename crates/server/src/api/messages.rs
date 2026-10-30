@@ -16,6 +16,10 @@ use crate::events::EventKind;
 use crate::state::AppState;
 
 const MAX_MESSAGE_LEN: usize = 4000;
+/// Base64 of an envelope with 4000 characters of up to 4 UTF-8 bytes each,
+/// JSON escaping and the envelope's own bytes.
+const MAX_ENCRYPTED_LEN: usize = 24_000;
+const MAX_MENTIONS: usize = 50;
 const DEFAULT_PAGE: i64 = 50;
 const MAX_PAGE: i64 = 100;
 const MAX_ATTACHMENTS: usize = 10;
@@ -27,6 +31,8 @@ pub struct MessageInfo {
     pub author_id: Option<Uuid>,
     pub author_name: Option<String>,
     pub content: String,
+    /// `content` is an end-to-end encrypted envelope (docs/e2ee.md).
+    pub encrypted: bool,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339::option")]
@@ -84,6 +90,13 @@ pub fn mentioned_names(content: &str) -> Vec<String> {
     names
 }
 
+/// Who a message mentions: `@name`s in plain text, or the user ids an
+/// encrypted message names next to its envelope.
+enum Mentions<'a> {
+    Text(&'a str),
+    Ids(&'a [Uuid]),
+}
+
 /// Stores the mentions of a message: group members other than the author
 /// who can see the channel.
 async fn store_mentions(
@@ -92,25 +105,38 @@ async fn store_mentions(
     member: &Member,
     channel_id: Uuid,
     message_id: Uuid,
-    content: &str,
+    content: Mentions<'_>,
 ) -> AppResult<()> {
     sqlx::query("DELETE FROM message_mentions WHERE message_id = $1")
         .bind(message_id)
         .execute(&mut *tx)
         .await?;
-    let names = mentioned_names(content);
-    if names.is_empty() {
-        return Ok(());
-    }
-    let candidates: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT u.id FROM users u JOIN members m ON m.user_id = u.id AND m.group_id = $1
-         WHERE u.name = ANY($2) AND u.id <> $3",
-    )
-    .bind(member.group_id)
-    .bind(&names)
-    .bind(member.user_id)
-    .fetch_all(&mut *tx)
-    .await?;
+    let candidates: Vec<Uuid> = match content {
+        Mentions::Text(content) => {
+            let names = mentioned_names(content);
+            if names.is_empty() {
+                return Ok(());
+            }
+            sqlx::query_scalar(
+                "SELECT u.id FROM users u JOIN members m ON m.user_id = u.id AND m.group_id = $1
+                 WHERE u.name = ANY($2) AND u.id <> $3",
+            )
+            .bind(member.group_id)
+            .bind(&names)
+            .bind(member.user_id)
+            .fetch_all(&mut *tx)
+            .await?
+        }
+        // The server cannot read encrypted text; the sender names the users.
+        Mentions::Ids(ids) => sqlx::query_scalar(
+            "SELECT user_id FROM members WHERE group_id = $1 AND user_id = ANY($2) AND user_id <> $3",
+        )
+        .bind(member.group_id)
+        .bind(ids)
+        .bind(member.user_id)
+        .fetch_all(&mut *tx)
+        .await?,
+    };
     for user_id in candidates {
         let other = Member::load(&state.db, member.group_id, user_id).await?;
         let perms = other.channel_permissions(&state.db, channel_id).await?;
@@ -189,7 +215,7 @@ pub async fn list(
     chat_access(&state.db, channel_id, user.id).await?;
     let limit = q.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
     let mut messages: Vec<MessageInfo> = sqlx::query_as(
-        "SELECT m.id, m.channel_id, m.author_id, u.display_name AS author_name, m.content, m.created_at, m.edited_at
+        "SELECT m.id, m.channel_id, m.author_id, u.display_name AS author_name, m.content, m.encrypted, m.created_at, m.edited_at
          FROM messages m LEFT JOIN users u ON u.id = m.author_id
          WHERE m.channel_id = $1 AND ($2::uuid IS NULL OR m.id < $2)
          ORDER BY m.id DESC LIMIT $3",
@@ -210,11 +236,53 @@ pub struct PostMessage {
     /// Uploaded attachments to link to this message.
     #[serde(default)]
     pub attachment_ids: Vec<Uuid>,
+    /// `content` is an end-to-end encrypted envelope.
+    #[serde(default)]
+    pub encrypted: bool,
+    /// Mentioned users of an encrypted message.
+    #[serde(default)]
+    pub mentions: Vec<Uuid>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct EditMessage {
     pub content: String,
+    #[serde(default)]
+    pub encrypted: bool,
+    #[serde(default)]
+    pub mentions: Vec<Uuid>,
+}
+
+/// Checks an encrypted envelope's shape; its content is the clients' business.
+fn validate_encrypted<'a>(content: &'a str, mentions: &'a [Uuid]) -> AppResult<Mentions<'a>> {
+    use base64::Engine;
+    let ok = !content.is_empty()
+        && content.len() <= MAX_ENCRYPTED_LEN
+        && base64::engine::general_purpose::STANDARD
+            .decode(content)
+            .is_ok();
+    if !ok {
+        return Err(AppError::bad_request("invalid encrypted message"));
+    }
+    if mentions.len() > MAX_MENTIONS {
+        return Err(AppError::bad_request("too many mentions"));
+    }
+    Ok(Mentions::Ids(mentions))
+}
+
+/// The stored content and its mentions.
+fn validate_message<'a>(
+    content: &'a str,
+    encrypted: bool,
+    mentions: &'a [Uuid],
+    allow_empty: bool,
+) -> AppResult<(&'a str, Mentions<'a>)> {
+    if encrypted {
+        Ok((content, validate_encrypted(content, mentions)?))
+    } else {
+        let content = validate_content(content, allow_empty)?;
+        Ok((content, Mentions::Text(content)))
+    }
 }
 
 fn validate_content(content: &str, allow_empty: bool) -> AppResult<&str> {
@@ -242,19 +310,26 @@ pub async fn post(
             "at most {MAX_ATTACHMENTS} attachments"
         )));
     }
-    let content = validate_content(&req.content, !req.attachment_ids.is_empty())?;
+    let (content, mentions) = validate_message(
+        &req.content,
+        req.encrypted,
+        &req.mentions,
+        !req.attachment_ids.is_empty(),
+    )?;
     let mut tx = state.db.begin().await?;
     let mut message: MessageInfo = sqlx::query_as(
         "WITH m AS (
-            INSERT INTO messages (id, channel_id, author_id, content) VALUES ($1, $2, $3, $4) RETURNING *
+            INSERT INTO messages (id, channel_id, author_id, content, encrypted)
+            VALUES ($1, $2, $3, $4, $5) RETURNING *
          )
-         SELECT m.id, m.channel_id, m.author_id, u.display_name AS author_name, m.content, m.created_at, m.edited_at
+         SELECT m.id, m.channel_id, m.author_id, u.display_name AS author_name, m.content, m.encrypted, m.created_at, m.edited_at
          FROM m LEFT JOIN users u ON u.id = m.author_id",
     )
     .bind(Uuid::now_v7())
     .bind(channel_id)
     .bind(user.id)
     .bind(content)
+    .bind(req.encrypted)
     .fetch_one(&mut *tx)
     .await?;
     if !req.attachment_ids.is_empty() {
@@ -275,7 +350,7 @@ pub async fn post(
         }
     }
     if let Some(member) = &access.member {
-        store_mentions(&state, &mut tx, member, channel_id, message.id, content).await?;
+        store_mentions(&state, &mut tx, member, channel_id, message.id, mentions).await?;
     }
     // Your own message is read by definition.
     mark_read(&mut *tx, user.id, channel_id, message.id).await?;
@@ -297,26 +372,27 @@ pub async fn edit(
     Json(req): Json<EditMessage>,
 ) -> AppResult<Json<MessageInfo>> {
     let access = chat_access(&state.db, channel_id, user.id).await?;
-    let content = validate_content(&req.content, false)?;
+    let (content, mentions) = validate_message(&req.content, req.encrypted, &req.mentions, false)?;
     let mut tx = state.db.begin().await?;
     // Only the author can edit; anything else looks like a missing message.
     let mut message: MessageInfo = sqlx::query_as(
         "WITH m AS (
-            UPDATE messages SET content = $4, edited_at = now()
+            UPDATE messages SET content = $4, encrypted = $5, edited_at = now()
             WHERE id = $1 AND channel_id = $2 AND author_id = $3 RETURNING *
          )
-         SELECT m.id, m.channel_id, m.author_id, u.display_name AS author_name, m.content, m.created_at, m.edited_at
+         SELECT m.id, m.channel_id, m.author_id, u.display_name AS author_name, m.content, m.encrypted, m.created_at, m.edited_at
          FROM m LEFT JOIN users u ON u.id = m.author_id",
     )
     .bind(message_id)
     .bind(channel_id)
     .bind(user.id)
     .bind(content)
+    .bind(req.encrypted)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or(AppError::NotFound)?;
     if let Some(member) = &access.member {
-        store_mentions(&state, &mut tx, member, channel_id, message.id, content).await?;
+        store_mentions(&state, &mut tx, member, channel_id, message.id, mentions).await?;
     }
     tx.commit().await?;
     attach(&state, std::slice::from_mut(&mut message)).await?;
@@ -458,9 +534,10 @@ pub async fn search(
     let channels = searchable_channels(&state, user.id, &q).await?;
     let limit = q.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
     let mut messages: Vec<MessageInfo> = sqlx::query_as(
-        "SELECT m.id, m.channel_id, m.author_id, u.display_name AS author_name, m.content, m.created_at, m.edited_at
+        "SELECT m.id, m.channel_id, m.author_id, u.display_name AS author_name, m.content, m.encrypted, m.created_at, m.edited_at
          FROM messages m LEFT JOIN users u ON u.id = m.author_id
          WHERE m.channel_id = ANY($1)
+           AND NOT m.encrypted
            AND to_tsvector('simple', m.content) @@ to_tsquery('simple', $2)
            AND ($3::uuid IS NULL OR m.id < $3)
          ORDER BY m.id DESC LIMIT $4",

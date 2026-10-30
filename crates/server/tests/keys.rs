@@ -329,3 +329,63 @@ async fn direct_message_keys(db: PgPool) {
         .await;
     assert_eq!(res.body["keys"].as_array().unwrap().len(), 1);
 }
+
+#[sqlx::test(migrator = "tinlink_server::MIGRATOR")]
+async fn encrypted_messages(db: PgPool) {
+    let app = TestApp::new(db);
+    let (owner, owner_id) = app.register("owner").await;
+    let (alice, alice_id) = app.register("alice").await;
+    let (_, stranger_id) = app.register("stranger").await;
+    let group = app.create_group(&owner, "G").await;
+    app.invite_and_join(&owner, &group, &alice).await;
+    let general = app.channel_id(&owner, &group, "general").await.unwrap();
+    let msgs = format!("/api/channels/{general}/messages");
+
+    let envelope = bytes(7, 200);
+    let res = app
+        .post(
+            &msgs,
+            &owner,
+            json!({ "content": envelope, "encrypted": true,
+                    "mentions": [alice_id, stranger_id, owner_id] }),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::CREATED, "{:?}", res.body);
+    assert_eq!(res.body["encrypted"], true);
+    assert_eq!(res.body["content"], envelope.as_str());
+    // Only members other than the author count as mentioned.
+    assert_eq!(res.body["mentions"], json!([alice_id]));
+    let id = res.body["id"].as_str().unwrap().to_owned();
+
+    let res = app
+        .post(
+            &msgs,
+            &owner,
+            json!({ "content": "not base64!", "encrypted": true }),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::BAD_REQUEST);
+
+    // Search cannot look into it.
+    let res = app
+        .post(&msgs, &owner, json!({ "content": "plain words" }))
+        .await;
+    assert_eq!(res.body["encrypted"], false);
+    let hits = app.get("/api/search?q=B", &alice).await;
+    assert_eq!(hits.body, json!([]));
+    let hits = app.get("/api/search?q=plain", &alice).await;
+    assert_eq!(hits.body.as_array().unwrap().len(), 1);
+
+    let res = app
+        .patch(
+            &format!("{msgs}/{id}"),
+            &owner,
+            json!({ "content": bytes(8, 100), "encrypted": true, "mentions": [] }),
+        )
+        .await;
+    assert_eq!(res.status, StatusCode::OK, "{:?}", res.body);
+    assert_eq!(res.body["mentions"], json!([]));
+    let list = app.get(&msgs, &alice).await;
+    assert_eq!(list.body[1]["content"], bytes(8, 100));
+    assert_eq!(list.body[1]["encrypted"], true);
+}

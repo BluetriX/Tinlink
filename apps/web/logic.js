@@ -304,3 +304,20 @@ export function memberPosition(member, roles) {
 export function roleColor(color) {
   return color == null ? null : `#${color.toString(16).padStart(6, "0")}`;
 }
+
+/**
+ * Lower-cased user names mentioned with `@name`, like the server finds them
+ * in plain messages; for encrypted ones the client names the users.
+ */
+export function mentionedNames(text) {
+  const nameChar = /[A-Za-z0-9_.-]/;
+  const names = [];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== "@" || (i > 0 && nameChar.test(text[i - 1]))) continue;
+    let end = i + 1;
+    while (end < text.length && nameChar.test(text[end])) end++;
+    const name = text.slice(i + 1, end).replace(/[.-]+$/, "").toLowerCase();
+    if (name.length >= 1 && name.length <= 32 && !names.includes(name)) names.push(name);
+  }
+  return names;
+}
