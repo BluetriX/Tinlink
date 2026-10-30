@@ -217,7 +217,22 @@ async fn channel_keys_follow_access(db: PgPool) {
     assert_eq!(res.body["epoch"], 1);
     assert_eq!(res.body["rotate"], false);
     assert_eq!(res.body["keys"][0]["sender_id"], owner_pc.as_str());
+    assert!(res.body["keys"][0]["sender_user_id"].is_string());
     assert_eq!(res.body["keys"][0]["wrapped"], bytes(4, 80));
+    let res = app.get(&format!("{keys}/devices"), &alice).await;
+    let users = res.body.as_array().unwrap();
+    assert_eq!(users.len(), 2);
+    let alice_keys = users
+        .iter()
+        .find(|u| u["user_id"] == alice_id.as_str())
+        .unwrap();
+    assert_eq!(
+        alice_keys["devices"].as_array().unwrap().len(),
+        1,
+        "pending device left out"
+    );
+    let res = app.get(&format!("{keys}/devices"), &stranger).await;
+    assert_eq!(res.status, StatusCode::NOT_FOUND);
     let res = app.get(&format!("{keys}?device={owner_pc}"), &alice).await;
     assert_eq!(res.status, StatusCode::NOT_FOUND, "not alice's device");
 
@@ -239,7 +254,9 @@ async fn channel_keys_follow_access(db: PgPool) {
     let res = app
         .post(&keys, &alice, post(1, &alice_new, &[&alice_pc]))
         .await;
-    assert_eq!(res.status, StatusCode::FORBIDDEN, "does not hold epoch 1");
+    // Another device of the same user holds epoch 1, which is enough.
+    assert_eq!(res.status, StatusCode::OK);
+    assert_eq!(res.body["added"], 0);
     let res = app
         .post(&keys, &alice, post(1, &alice_pc, &[&alice_new]))
         .await;

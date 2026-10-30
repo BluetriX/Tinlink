@@ -7,6 +7,8 @@ import {
 } from "./logic.js";
 import { createSettings, hasSettings } from "./admin.js";
 import { avatar, chooseAndUpload, imageUrl, initials } from "./images.js";
+import { createKeyring } from "./keyring.js";
+import { mediaKey, mediaKeyIndex, toBase64 } from "./e2ee.js";
 
 const LK = window.LivekitClient;
 
@@ -130,6 +132,7 @@ const api = (method, path, body) => request(method, path, body);
 function sessionExpired() {
   store.set("tinlink.session", null);
   state.session = null;
+  state.keyring = null;
   leaveVoice();
   closeGateway();
   showLogin("Your session has expired, please log in again.");
@@ -262,6 +265,7 @@ $("logout").addEventListener("click", async () => {
   closeGateway();
   store.set("tinlink.session", null);
   state.session = null;
+  state.keyring = null;
   showLogin();
 });
 
@@ -282,6 +286,7 @@ $("me").addEventListener("click", async () => {
   };
   removeButton.onclick = () => run(() => setAvatar(null));
   let wantsPassword = false;
+  let wantsEncryption = false;
   const values = await ask({
     title: "Your profile",
     text: el("div", {},
@@ -293,6 +298,15 @@ $("me").addEventListener("click", async () => {
         }),
         removeButton),
       el("p", { class: "hint", textContent: `User name: @${user.name} (cannot be changed)` }),
+      el("p", { class: "hint" },
+        state.keyring?.approved ? "Encryption: this browser is approved. " : "Encryption: this browser is not approved yet. ",
+        el("button", {
+          type: "button", class: "link", textContent: state.keyring?.approved ? "Approve another device…" : "Approve…",
+          onclick: () => {
+            wantsEncryption = true;
+            $("dialog-cancel").click();
+          },
+        })),
       el("button", {
         type: "button", class: "link", textContent: "Change password…",
         onclick: () => {
@@ -310,6 +324,10 @@ $("me").addEventListener("click", async () => {
   });
   if (values) setStatus("Profile saved");
   if (wantsPassword) changePassword();
+  if (wantsEncryption) {
+    if (state.keyring?.approved) approvePendingDevices({ explicit: true });
+    else approveThisBrowser();
+  }
 });
 
 async function changePassword() {
@@ -340,6 +358,7 @@ async function showMain() {
   state.dms = [];
   $("member-panel").hidden = false;
   openGateway();
+  setupEncryption();
   await Promise.all([loadGroups(), loadDms()]);
   const saved = settings.load();
   const groupId = state.groups.some((g) => g.id === saved.groupId) ? saved.groupId : state.groups[0]?.id;
@@ -1415,6 +1434,12 @@ function onGatewayEvent(e) {
         if (state.channel?.id === e.channel_id) renderTyping();
       }
       break;
+    case "keys_changed":
+      onKeysChanged(e.user_id);
+      break;
+    case "channel_keys_added":
+      onChannelKeysAdded(e.channel_id);
+      break;
     case "resync":
       loadGroups();
       loadDms();
@@ -1424,8 +1449,148 @@ function onGatewayEvent(e) {
     default:
       // channel_created/updated/deleted, member_joined, group_updated, voice_mute_changed
       if (inGroup) refreshGroup();
-      if (e.type === "group_updated" || e.type === "member_joined") refreshGroups();
+      if (e.type === "group_updated" || e.type === "member_joined") {
+        refreshGroups();
+        shareKeysSoon();
+      }
   }
+}
+
+// ------------------------------------------------------------- encryption
+
+/** Name of this browser in the device list. */
+function browserName() {
+  const ua = navigator.userAgent;
+  const browser = /Edg\//.test(ua) ? "Edge" : /Firefox\//.test(ua) ? "Firefox" : /Chrome\//.test(ua) ? "Chrome" : /Safari\//.test(ua) ? "Safari" : "Browser";
+  const os = /Windows/.test(ua) ? "Windows" : /Mac OS/.test(ua) ? "macOS" : /Android/.test(ua) ? "Android" : /iPhone|iPad/.test(ua) ? "iOS" : /Linux/.test(ua) ? "Linux" : "";
+  return os ? `${browser} on ${os}` : browser;
+}
+
+/** Sets up this browser's keys after login; asks for what is missing. */
+async function setupEncryption() {
+  if (!crypto.subtle) return;
+  const keyring = createKeyring({
+    api,
+    userId: state.session.user.id,
+    onWarning: (userId) => setStatus(
+      `The security key of ${memberName(userId) || "a member"} changed. Their devices get no keys until you check this with them.`, true),
+  });
+  state.keyring = keyring;
+  try {
+    let status = await keyring.setup(browserName());
+    if (status === "revoked") status = await keyring.setup(browserName());
+    if (state.keyring !== keyring) return;
+    if (status === "new_identity") await showRecoveryKey(await keyring.createIdentity());
+    else if (status === "pending") await approveThisBrowser();
+    if (keyring.approved) {
+      await approvePendingDevices();
+      shareKeysSoon();
+    }
+  } catch (e) {
+    console.warn("encryption setup failed", e);
+    setStatus(`Encryption is not available: ${e.message || e}`, true);
+  }
+}
+
+async function showRecoveryKey(text) {
+  await ask({
+    title: "Your recovery key",
+    text: el("div", {},
+      el("p", { textContent: "Tinlink encrypts voice and messages end to end. This key restores your access on a new device or browser. Keep it in your password manager; nobody else, not even the server, can recover it for you." }),
+      el("p", {}, el("code", { class: "code", textContent: text }))),
+    fields: [{ id: "saved", label: "I have saved my recovery key", type: "checkbox" }],
+    cancel: false,
+    ok: "Done",
+    submit: (v) => (v.saved ? null : "Please save the key first."),
+  });
+}
+
+/** Asks for the recovery key, or for approval on another device. */
+async function approveThisBrowser() {
+  const keyring = state.keyring;
+  const code = await keyring.code();
+  await ask({
+    title: "Approve this browser",
+    text: el("div", {},
+      el("p", { textContent: "Your account is protected with end-to-end encryption. Enter your recovery key, or approve this browser in Tinlink on a device that is already approved. It shows this code:" }),
+      el("p", {}, el("code", { class: "code", textContent: code }))),
+    fields: [{ id: "recovery", label: "Recovery key", placeholder: "XXXX XXXX …" }],
+    ok: "Approve",
+    cancel: true,
+    submit: (v) => {
+      if (keyring.approved) return null;
+      if (!v.recovery) return "Enter the recovery key, or approve on another device.";
+      return tryText(() => keyring.useRecoveryKey(v.recovery));
+    },
+  });
+  if (keyring.approved) {
+    setStatus("This browser is approved for encryption");
+    shareKeysSoon();
+  }
+}
+
+/** Offers to approve own devices that wait for it. */
+async function approvePendingDevices({ explicit = false } = {}) {
+  const keyring = state.keyring;
+  if (!keyring?.canApprove) {
+    if (explicit) setStatus("Only a device that was set up with the recovery key can approve others.", true);
+    return;
+  }
+  const pending = await keyring.pendingDevices();
+  if (!pending.length && explicit) setStatus("No device is waiting for approval.");
+  for (const d of pending) {
+    const yes = await ask({
+      title: "Approve a new device?",
+      text: el("div", {},
+        el("p", { textContent: `"${d.name}" wants to read your encrypted channels. Approve it only if it shows this code:` }),
+        el("p", {}, el("code", { class: "code", textContent: d.code }))),
+      ok: "Approve",
+    });
+    if (yes) await run(() => keyring.approveDevice(d));
+  }
+}
+
+async function onKeysChanged(userId) {
+  const keyring = state.keyring;
+  if (!keyring) return;
+  if (userId === state.session?.user.id) {
+    const wasApproved = keyring.approved;
+    const status = await keyring.refresh().catch(() => null);
+    if (!wasApproved && status === "ready") {
+      // Approved from another device while the dialog is open.
+      if ($("dialog").open && $("dialog-title").textContent === "Approve this browser") $("dialog-cancel").click();
+      setStatus("This browser is approved for encryption");
+    }
+    if (status === "revoked") setupEncryption();
+    else if (keyring.approved) approvePendingDevices();
+  }
+  shareKeysSoon();
+}
+
+async function onChannelKeysAdded(channelId) {
+  if (voice.channel?.id === channelId && voice.mediaKeys) {
+    await run(async () => {
+      await state.keyring.load(channelId);
+      await applyMediaKeys(channelId, voice.mediaKeys);
+    });
+  }
+  shareKeysSoon();
+}
+
+/**
+ * Shares channel keys with new members and devices. Every approved device
+ * does this; the server ignores keys someone else delivered first.
+ */
+function shareKeysSoon() {
+  clearTimeout(shareKeysSoon.timer);
+  shareKeysSoon.timer = setTimeout(async () => {
+    const keyring = state.keyring;
+    if (!keyring?.approved) return;
+    const channels = [...state.channels.map((c) => c.id), ...state.dms.map((d) => d.id)];
+    for (const id of channels) {
+      await keyring.shareMissing(id).catch((e) => console.warn("sharing keys failed", id, e));
+    }
+  }, 1500 + Math.random() * 1500);
 }
 
 // ------------------------------------------------------------------ voice
@@ -1442,6 +1607,7 @@ const voice = {
   speaking: new SpeakingTracker(), // by identity
   remoteMeters: new Map(), // identity -> { node, source }
   rows: new Map(), // identity -> participant list entry
+  mediaKeys: null, // key provider when encrypting with channel keys
 };
 
 let audioContext = null;
@@ -1599,20 +1765,41 @@ function stopRemoteMeter(id) {
   if (voice.speaking.remove(id)) updateSpeaking();
 }
 
+/** Shared frame keys at a chosen index, so the previous epoch still decrypts. */
+class MediaKeyProvider extends (LK?.ExternalE2EEKeyProvider || Object) {
+  async setKeyAt(key, index) {
+    this.onSetEncryptionKey(await LK.createKeyMaterialFromString(key), undefined, index);
+  }
+}
+
+/** Hands the channel's media keys to the room's key provider, newest last. */
+async function applyMediaKeys(channelId, keyProvider) {
+  for (const [epoch, key] of state.keyring.known(channelId).slice(-16)) {
+    // A string key goes through PBKDF2 like in the desktop client's SDK.
+    await keyProvider.setKeyAt(toBase64(await mediaKey(key, channelId)), mediaKeyIndex(epoch));
+  }
+}
+
 /**
- * Frame encryption options for a voice room, or undefined without a key.
- * A string key goes through PBKDF2 like in the desktop client's SDK, so
- * both decrypt each other's frames.
+ * Frame encryption options for a voice room, or undefined when it is off:
+ * with the channel's keys, or with a test key everyone typed in.
  */
-async function mediaEncryption(key) {
-  if (!key) return undefined;
+async function mediaEncryption(ch, saved) {
+  const mode = saved.e2eeMode || (saved.e2eeTestKey ? "test" : "off");
+  if (mode === "off" || (mode === "test" && !saved.e2eeTestKey)) return undefined;
   if (!LK.isE2EESupported()) throw new Error("this browser cannot encrypt voice end to end");
-  const keyProvider = new LK.ExternalE2EEKeyProvider();
-  await keyProvider.setKey(key);
+  const keyProvider = new MediaKeyProvider();
+  if (mode === "test") {
+    await keyProvider.setKey(saved.e2eeTestKey);
+  } else {
+    if (!state.keyring?.approved) throw new Error("approve this browser for encryption first (your profile)");
+    await state.keyring.current(ch.id);
+    await applyMediaKeys(ch.id, keyProvider);
+  }
   // The SDK leaves the worker to us; the previous room is gone by now.
   e2eeWorker?.terminate();
   e2eeWorker = new Worker("vendor/livekit-client-2.22.4.e2ee.worker.js");
-  return { keyProvider, worker: e2eeWorker };
+  return { keyProvider, worker: e2eeWorker, mode };
 }
 let e2eeWorker = null;
 
@@ -1624,7 +1811,8 @@ async function joinVoice(ch, { quiet = false } = {}) {
     const token = await api("POST", `/channels/${ch.id}/voice-token`, {});
     await leaveVoice({ keepRejoin: true });
     const saved = settings.load();
-    const encryption = await mediaEncryption(saved.e2eeTestKey);
+    const encryption = await mediaEncryption(ch, saved);
+    voice.mediaKeys = encryption?.mode === "keys" ? encryption.keyProvider : null;
     const room = new LK.Room({
       adaptiveStream: true,
       dynacast: true,
@@ -1793,6 +1981,7 @@ function cleanupVoice() {
   voice.micTrack = null;
   voice.room = null;
   voice.channel = null;
+  voice.mediaKeys = null;
   voice.speaking.clear();
   $("voice-status").textContent = "Not in voice";
   $("voice-status").classList.add("muted");
@@ -2360,7 +2549,13 @@ async function init() {
   if (saved.shareHint) $("share-hint").value = saved.shareHint;
   if (saved.shareDegradation) $("share-degradation").value = saved.shareDegradation;
   $("low-latency").checked = !!saved.lowLatency;
+  $("e2ee-mode").value = saved.e2eeMode || (saved.e2eeTestKey ? "test" : "off");
   $("e2ee-test-key").value = saved.e2eeTestKey || "";
+  $("e2ee-test-key-row").hidden = $("e2ee-mode").value !== "test";
+  $("e2ee-mode").addEventListener("change", () => {
+    settings.save({ e2eeMode: $("e2ee-mode").value });
+    $("e2ee-test-key-row").hidden = $("e2ee-mode").value !== "test";
+  });
   $("e2ee-test-key").addEventListener("change", () => settings.save({ e2eeTestKey: $("e2ee-test-key").value.trim() }));
   $("share-hint").addEventListener("change", () => settings.save({ shareHint: $("share-hint").value }));
   $("share-degradation").addEventListener("change", () => settings.save({ shareDegradation: $("share-degradation").value }));

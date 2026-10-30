@@ -1,7 +1,9 @@
 # End-to-end encryption
 
-Status: server storage for keys is in place; clients follow in steps. Until
-then voice can use a fixed test key (`TINLINK_E2EE_TEST_KEY`, see README).
+Status: the server stores keys; the web client sets up devices, the
+recovery key and channel keys, and can encrypt voice with channel keys
+(opt-in while the desktop client only knows the test key from the README).
+Messages and files are not encrypted yet.
 
 The server stores public keys and wrapped channel keys and decides who may
 fetch them. It never sees a private key, a channel key, a message or a media
@@ -27,7 +29,7 @@ the web code that the Rust tests open.
 | Key | Type | Where the private part lives |
 | --- | --- | --- |
 | Identity key, one per user | Ed25519 | Every approved device of the user, and encrypted with the recovery key on the server (`identity_backup`) |
-| Device signing key | Ed25519 | That device only |
+| Device signing key | Ed25519 | That device only (browser: IndexedDB of the server's origin) |
 | Device key agreement key | X25519 | That device only |
 | Backup key, one per user | X25519, derived from the recovery key | Nowhere; derived again when the recovery key is entered |
 | Channel key, one per channel and epoch | 32 random bytes | Wrapped to every device that may read the channel |
@@ -114,6 +116,7 @@ switches.
 | `PUT /api/devices/{id}/certificate` | Approve one of the caller's devices |
 | `DELETE /api/devices/{id}` | Revoke one of the caller's devices |
 | `GET /api/channels/{id}/keys?device=` | Newest epoch, `rotate` flag and all keys wrapped to that device |
+| `GET /api/channels/{id}/keys/devices` | Identity keys and approved devices of everyone who can read the channel |
 | `GET /api/channels/{id}/keys/missing?device=` | Devices of readers lacking epochs this device holds |
 | `POST /api/channels/{id}/keys` | Start the next epoch or share an existing one |
 

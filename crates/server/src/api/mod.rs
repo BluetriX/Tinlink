@@ -41,6 +41,10 @@ pub fn router() -> Router<AppState> {
             get(keys::channel_keys).post(keys::add_keys),
         )
         .route(
+            "/channels/{channel_id}/keys/devices",
+            get(keys::channel_devices),
+        )
+        .route(
             "/channels/{channel_id}/keys/missing",
             get(keys::missing_keys),
         )

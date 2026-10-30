@@ -172,6 +172,16 @@ pub async fn user_keys(
             return Err(AppError::NotFound);
         }
     }
+    Ok(Json(load_user_keys(&state, user_id, is_self).await?))
+}
+
+/// A user's identity key and active devices; pending ones only with
+/// `with_pending`.
+async fn load_user_keys(
+    state: &AppState,
+    user_id: Uuid,
+    with_pending: bool,
+) -> AppResult<UserKeys> {
     let identity_key: Option<Option<Bytes>> =
         sqlx::query_scalar("SELECT identity_key FROM users WHERE id = $1")
             .bind(user_id)
@@ -184,14 +194,28 @@ pub async fn user_keys(
          ORDER BY created_at",
     )
     .bind(user_id)
-    .bind(is_self)
+    .bind(with_pending)
     .fetch_all(&state.db)
     .await?;
-    Ok(Json(UserKeys {
+    Ok(UserKeys {
         user_id,
         identity_key,
         devices,
-    }))
+    })
+}
+
+/// Keys of everyone who can read the channel: who a new epoch goes to.
+pub async fn channel_devices(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(channel_id): Path<Uuid>,
+) -> AppResult<Json<Vec<UserKeys>>> {
+    chat_access(&state.db, channel_id, user.id).await?;
+    let mut out = Vec::new();
+    for reader in chat_readers(&state.db, channel_id).await? {
+        out.push(load_user_keys(&state, reader, false).await?);
+    }
+    Ok(Json(out))
 }
 
 #[derive(Debug, Deserialize)]
@@ -315,6 +339,8 @@ async fn own_device(state: &AppState, user: &AuthUser, device_id: Uuid) -> AppRe
 pub struct WrappedKey {
     pub epoch: i32,
     pub sender_id: Uuid,
+    /// Whose identity key certifies the sending device.
+    pub sender_user_id: Uuid,
     pub wrapped: Bytes,
     pub signature: Bytes,
 }
@@ -366,8 +392,9 @@ pub async fn channel_keys(
         None => false,
     };
     let keys = sqlx::query_as(
-        "SELECT epoch, sender_id, wrapped, signature FROM channel_keys
-         WHERE channel_id = $1 AND device_id = $2 ORDER BY epoch",
+        "SELECT k.epoch, k.sender_id, d.user_id AS sender_user_id, k.wrapped, k.signature
+         FROM channel_keys k JOIN devices d ON d.id = k.sender_id
+         WHERE k.channel_id = $1 AND k.device_id = $2 ORDER BY k.epoch",
     )
     .bind(channel_id)
     .bind(q.device)
@@ -521,13 +548,15 @@ pub async fn add_keys(
             req.epoch
         )));
     } else {
+        // Held by any of the caller's devices, including the backup a
+        // device just opened with the recovery key.
         let holds: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM channel_keys
-                            WHERE channel_id = $1 AND epoch = $2 AND device_id = $3)",
+            "SELECT EXISTS (SELECT 1 FROM channel_keys k JOIN devices d ON d.id = k.device_id
+                            WHERE k.channel_id = $1 AND k.epoch = $2 AND d.user_id = $3)",
         )
         .bind(channel_id)
         .bind(req.epoch)
-        .bind(req.device_id)
+        .bind(user.id)
         .fetch_one(&mut *tx)
         .await?;
         if !holds {
