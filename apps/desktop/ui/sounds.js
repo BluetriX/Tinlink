@@ -1,11 +1,12 @@
-// Notification sounds, in packs: sounds/<pack>/<sound>.wav. The "retro"
-// pack is synthesized by tools/sounds/generate.py (no samples). This file is
-// shared verbatim by the web and the desktop client; CI checks both copies
-// are the same.
+// Notification sounds, in packs: sounds/<pack>/<sound>.wav. The packs are
+// made by tools/sounds/generate.py (synthesizer and speech synthesis, no
+// samples). This file is shared verbatim by the web and the desktop client;
+// CI checks both copies are the same.
 
 /** Available packs; a pack may leave sounds out, those come from DEFAULT_PACK. */
 export const PACKS = [
   { id: "retro", label: "Retro" },
+  { id: "announcer", label: "Announcer (voice)" },
 ];
 const DEFAULT_PACK = "retro";
 

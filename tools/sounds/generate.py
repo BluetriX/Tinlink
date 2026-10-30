@@ -2,10 +2,12 @@
 """Synthesizes Tinlink's notification sound packs.
 
 Sounds come in packs: sounds/<pack>/<sound>.wav in both clients, listed in
-sounds.js. The packs in PACKS below are built here from oscillators and
-envelopes: no samples, no recordings, so the files are ours (same license as
-the clients). The output is deterministic; CI checks that the committed files
-match this script. A pack made some other way (e.g. CC0 recordings) only needs
+sounds.js. The packs in PACKS below are built here: "retro" from oscillators
+and envelopes, "announcer" from the flite speech synthesizer (voice
+cmu_us_slt, free license) and a radio filter plus reverb. No samples, no
+recordings, so the files are ours (same license as the clients). The output
+is deterministic; CI checks that the committed files match this script
+(packs that need flite only where it is installed: apt install flite). A pack made some other way (e.g. CC0 recordings) only needs
 its files and an entry in sounds.js; missing sounds fall back to "retro".
 
     python3 tools/sounds/generate.py            # writes into both clients
@@ -15,8 +17,11 @@ its files and an entry in sounds.js; missing sounds fall back to "retro".
 
 import argparse
 import math
+import shutil
 import struct
+import subprocess
 import sys
+import tempfile
 import wave
 from pathlib import Path
 
@@ -229,7 +234,109 @@ RETRO = {
     "talking-muted": (talking_muted, -13),
 }
 
-PACKS = {"retro": RETRO}
+
+
+# --------------------------------------------------- pack "announcer"
+# A computer voice says what happened, band-limited like a radio and with
+# a big room behind it: the style of early 2000s voice chat programs.
+
+VOICE = "slt"
+
+
+def speak(text):
+    """flite's speech for `text`, as floats at RATE."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "speech.wav"
+        subprocess.run(["flite", "-voice", VOICE, "-t", text, "-o", str(path)], check=True)
+        with wave.open(str(path), "rb") as w:
+            rate = w.getframerate()
+            data = w.readframes(w.getnframes())
+    pcm = struct.unpack(f"<{len(data) // 2}h", data)
+    return resample([x / 32768 for x in pcm], rate, RATE)
+
+
+def resample(x, src, dst):
+    """Linear interpolation; fine for speech that is low-passed afterwards."""
+    n = int(len(x) * dst / src)
+    out = []
+    for i in range(n):
+        pos = i * src / dst
+        j = int(pos)
+        frac = pos - j
+        a = x[j]
+        b = x[j + 1] if j + 1 < len(x) else 0.0
+        out.append(a + (b - a) * frac)
+    return out
+
+
+def trim(x, threshold=0.01):
+    """Cuts the silence flite leaves before and after the words."""
+    loud = [i for i, v in enumerate(x) if abs(v) > threshold]
+    return x[max(0, loud[0] - 200):loud[-1] + 200] if loud else x
+
+
+def one_pole(x, cutoff, high=False):
+    a = 1 - math.exp(-2 * math.pi * cutoff / RATE)
+    y = 0.0
+    out = []
+    for v in x:
+        y += a * (v - y)
+        out.append(v - y if high else y)
+    return out
+
+
+def reverb(x, seconds, decay, mix):
+    """Schroeder reverb: four combs in parallel, two all-passes in series."""
+    tail = int(seconds * RATE)
+    dry = x + [0.0] * tail
+    wet = [0.0] * len(dry)
+    for ms in (29.7, 37.1, 41.1, 43.7):
+        d = int(ms / 1000 * RATE)
+        g = 10 ** (-3 * (ms / 1000) / decay)  # -60 dB after `decay` seconds
+        buf = [0.0] * len(dry)
+        for i, v in enumerate(dry):
+            buf[i] = v + (buf[i - d] * g if i >= d else 0.0)
+            wet[i] += buf[i] * 0.25
+    for ms, g in ((5.0, 0.7), (1.7, 0.7)):
+        d = int(ms / 1000 * RATE)
+        out = [0.0] * len(wet)
+        for i, v in enumerate(wet):
+            back = wet[i - d] if i >= d else 0.0
+            prev = out[i - d] if i >= d else 0.0
+            out[i] = -g * v + back + g * prev
+        wet = out
+    return [a + (b - a) * mix for a, b in zip(dry, wet)]
+
+
+def announce(text):
+    def build():
+        x = trim(speak(text))
+        for _ in range(3):
+            x = one_pole(x, 450, high=True)
+        x = one_pole(x, 5000)
+        peak = max(abs(v) for v in x) or 1.0
+        # A little drive, like an old radio speaker.
+        x = [math.tanh(1.8 * v / peak) for v in x]
+        tr = Track(0)
+        tr.buf = reverb(x, 0.9, 1.1, 0.28)
+        return tr
+    build.needs = "flite"
+    return build
+
+
+ANNOUNCER = {
+    "connected": (announce("Connected"), -4),
+    "disconnected": (announce("Disconnected"), -4),
+    "user-joined": (announce("User joined"), -4),
+    "user-left": (announce("User left"), -4),
+    "moved": (announce("You were moved"), -4),
+    "removed": (announce("You were removed"), -4),
+    "connection-lost": (announce("Connection lost"), -4),
+    "message": (announce("New message"), -5),
+    "talking-muted": (announce("You are muted"), -6),
+}
+
+PACKS = {"retro": RETRO, "announcer": ANNOUNCER}
 
 
 def to_pcm(samples):
@@ -265,6 +372,12 @@ def main():
     stale = []
     for pack, sounds in PACKS.items():
         for name, (build, peak_db) in sounds.items():
+            tool = getattr(build, "needs", None)
+            if tool and not shutil.which(tool):
+                if not args.check:
+                    sys.exit(f"pack {pack} needs {tool}")
+                print(f"{pack}/{name}.wav  skipped, {tool} not installed")
+                continue
             stale += build_sound(pack, name, build, peak_db, targets, args.check)
     if stale:
         for path in stale:
