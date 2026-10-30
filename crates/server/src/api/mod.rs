@@ -5,6 +5,7 @@ mod channels;
 mod direct;
 mod groups;
 mod images;
+mod keys;
 mod messages;
 mod roles;
 mod voice;
@@ -26,6 +27,23 @@ pub fn router() -> Router<AppState> {
         .route("/users/me/avatar", put(images::set_avatar))
         .route("/images/{id}", get(images::get))
         .route("/users/me/password", put(auth::change_password))
+        .route("/users/me/identity", put(keys::set_identity))
+        .route("/users/me/identity-backup", get(keys::identity_backup))
+        .route("/users/{user_id}/keys", get(keys::user_keys))
+        .route("/devices", post(keys::create_device))
+        .route("/devices/{device_id}", delete(keys::revoke_device))
+        .route(
+            "/devices/{device_id}/certificate",
+            put(keys::certify_device),
+        )
+        .route(
+            "/channels/{channel_id}/keys",
+            get(keys::channel_keys).post(keys::add_keys),
+        )
+        .route(
+            "/channels/{channel_id}/keys/missing",
+            get(keys::missing_keys),
+        )
         .route("/info", get(info))
         .route("/dms", get(direct::list).post(direct::open))
         .route("/search", get(messages::search))

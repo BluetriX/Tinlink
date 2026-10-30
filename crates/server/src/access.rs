@@ -225,3 +225,35 @@ pub async fn is_direct_participant(db: &PgPool, channel_id: Uuid, user_id: Uuid)
     .await
     .unwrap_or(false)
 }
+
+/// Everyone who can read a chat: the members of the channel's group with
+/// VIEW_CHANNEL, or the two participants of a direct message channel.
+pub async fn chat_readers(db: &PgPool, channel_id: Uuid) -> AppResult<Vec<Uuid>> {
+    let row: Option<(Option<Uuid>, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+        "SELECT c.group_id, d.user_a, d.user_b FROM channels c
+         LEFT JOIN direct_channels d ON d.channel_id = c.id WHERE c.id = $1",
+    )
+    .bind(channel_id)
+    .fetch_optional(db)
+    .await?;
+    let group_id = match row.ok_or(AppError::NotFound)? {
+        (Some(group_id), _, _) => group_id,
+        (None, a, b) => return Ok(a.into_iter().chain(b).collect()),
+    };
+    let users: Vec<Uuid> = sqlx::query_scalar("SELECT user_id FROM members WHERE group_id = $1")
+        .bind(group_id)
+        .fetch_all(db)
+        .await?;
+    let mut readers = Vec::with_capacity(users.len());
+    for user_id in users {
+        let member = Member::load(db, group_id, user_id).await?;
+        if member
+            .channel_permissions(db, channel_id)
+            .await?
+            .contains(Permissions::VIEW_CHANNEL)
+        {
+            readers.push(user_id);
+        }
+    }
+    Ok(readers)
+}

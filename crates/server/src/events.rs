@@ -42,6 +42,13 @@ pub enum EventKind {
     /// A user changed their display name or avatar; `data` is the user.
     /// Sent to every connected user, like the profile it describes.
     UserUpdated,
+    /// A user's identity key or devices changed (`user_id`); clients refetch
+    /// that user's keys and share channel keys with new devices. Sent to
+    /// every connected user, like the keys it describes.
+    KeysChanged,
+    /// New wrapped channel keys were stored (`data.epoch`); clients fetch
+    /// the ones for their device.
+    ChannelKeysAdded,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -122,6 +129,16 @@ impl EventHub {
             channel_id: None,
             user_id: Some(user.id),
             data: serde_json::to_value(user).unwrap_or(Value::Null),
+        });
+    }
+
+    pub fn keys_changed(&self, user_id: Uuid) {
+        self.publish(Event {
+            kind: EventKind::KeysChanged,
+            group_id: None,
+            channel_id: None,
+            user_id: Some(user_id),
+            data: Value::Null,
         });
     }
 

@@ -183,7 +183,7 @@ async fn should_deliver(
     groups: &mut HashSet<Uuid>,
     event: &Event,
 ) -> bool {
-    if event.kind == EventKind::UserUpdated {
+    if matches!(event.kind, EventKind::UserUpdated | EventKind::KeysChanged) {
         return true;
     }
     let Some(group_id) = event.group_id else {
