@@ -1061,6 +1061,20 @@ dialog h2 {
   font-size: 16px;
 }
 
+.recovery-key {
+  display: grid;
+  grid-template-columns: repeat(4, max-content);
+  justify-content: center;
+  gap: 6px 16px;
+  margin: 12px 0 4px;
+  padding: 12px;
+  font: 17px Consolas, monospace;
+  letter-spacing: 1px;
+  background: var(--panel-2);
+  border-radius: 4px;
+  user-select: all;
+}
+
 .code {
   font: 18px Consolas, monospace;
   user-select: all;

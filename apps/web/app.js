@@ -1631,7 +1631,11 @@ async function showRecoveryKey(text) {
     title: "Your recovery key",
     text: el("div", {},
       el("p", { textContent: "Tinlink encrypts voice and messages end to end. This key restores your access on a new device or browser. Keep it in your password manager; nobody else, not even the server, can recover it for you." }),
-      el("p", {}, el("code", { class: "code", textContent: text }))),
+      el("div", { class: "recovery-key" }, ...text.split(/\s+/).map((group) => el("span", { textContent: group }))),
+      el("p", {}, el("button", {
+        type: "button", class: "small", textContent: "Copy",
+        onclick: (ev) => navigator.clipboard.writeText(text).then(() => { ev.target.textContent = "Copied"; }),
+      }))),
     fields: [{ id: "saved", label: "I have saved my recovery key", type: "checkbox" }],
     cancel: false,
     ok: "Done",
