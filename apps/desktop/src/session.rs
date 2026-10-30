@@ -172,20 +172,60 @@ fn livekit_http_base(url: &str) -> String {
     }
 }
 
-/// Frame encryption for voice, webcams and screen shares, while keys are
-/// not distributed yet: everyone in the channel sets the same test key in
-/// `TINLINK_E2EE_TEST_KEY` (the web client has a field for it). The SDK
-/// derives the AES-GCM key with PBKDF2 like the web client does for a
-/// string key, so both decrypt each other.
-fn media_encryption() -> Option<E2eeOptions> {
-    let key = std::env::var("TINLINK_E2EE_TEST_KEY")
+/// A frame key for voice, webcams and screen shares, derived by the UI from
+/// a channel key epoch (docs/e2ee.md).
+#[derive(Debug, Clone, Deserialize)]
+pub struct MediaKey {
+    /// LiveKit key index: the epoch modulo 16.
+    pub index: i32,
+    /// Base64 of the media key. The SDK derives the AES-GCM key from this
+    /// string with PBKDF2, like the web client does, so both decrypt each
+    /// other.
+    pub key: String,
+}
+
+/// Frame encryption with the channel's media keys (newest last), or with a
+/// test key from `TINLINK_E2EE_TEST_KEY` that everyone in the channel sets.
+fn media_encryption(keys: &[MediaKey]) -> Option<E2eeOptions> {
+    let test_key = std::env::var("TINLINK_E2EE_TEST_KEY")
         .ok()
-        .filter(|k| !k.is_empty())?;
-    tracing::info!("voice encryption on (test key)");
+        .filter(|k| !k.is_empty());
+    let key_provider = if let Some(key) = test_key {
+        tracing::info!("voice encryption on (test key)");
+        KeyProvider::with_shared_key(KeyProviderOptions::default(), key.into_bytes())
+    } else {
+        let (first, rest) = keys.split_first()?;
+        tracing::info!(keys = keys.len(), "voice encryption on (channel keys)");
+        let provider = KeyProvider::with_shared_key(
+            KeyProviderOptions::default(),
+            first.key.clone().into_bytes(),
+        );
+        // with_shared_key stores at index 0; put it where it belongs.
+        provider.set_shared_key(first.key.clone().into_bytes(), first.index);
+        for key in rest {
+            provider.set_shared_key(key.key.clone().into_bytes(), key.index);
+        }
+        provider
+    };
     Some(E2eeOptions {
         encryption_type: EncryptionType::Gcm,
-        key_provider: KeyProvider::with_shared_key(KeyProviderOptions::default(), key.into_bytes()),
+        key_provider,
     })
+}
+
+/// The SDK encrypts every local track at key index 0; point them at the
+/// newest key instead, which is the index receivers look up.
+fn apply_local_key_index(room: &Room) {
+    let Some(provider) = room.e2ee_manager().key_provider() else {
+        return;
+    };
+    let index = provider.get_latest_key_index();
+    let me = room.local_participant().identity();
+    for ((identity, _), cryptor) in room.e2ee_manager().frame_cryptors() {
+        if identity == me {
+            cryptor.set_key_index(index);
+        }
+    }
 }
 
 /// Checks that LiveKit answers before connecting. A failed `Room::connect`
@@ -212,6 +252,7 @@ impl Session {
         audio: PlatformAudio,
         voice: &Voice,
         audio_prefs: &AudioPrefs,
+        media_keys: &[MediaKey],
     ) -> Result<Self> {
         ensure_voice_server_reachable(&token.url).await?;
         // Must exist before the first track is created so WebRTC captures
@@ -221,7 +262,7 @@ impl Session {
         let mut options = RoomOptions::default();
         options.auto_subscribe = true;
         options.dynacast = true;
-        options.encryption = media_encryption();
+        options.encryption = media_encryption(media_keys);
         let (room, events) = Room::connect(&token.url, &token.token, options)
             .await
             .with_context(|| format!("cannot connect to LiveKit at {}", token.url))?;
@@ -296,6 +337,21 @@ impl Session {
 
     pub fn identity(&self) -> &str {
         &self.identity
+    }
+
+    /// Adds media keys of newer channel key epochs during a call; frames
+    /// of our own tracks switch to the newest one.
+    pub fn set_media_keys(&self, keys: &[MediaKey]) -> Result<()> {
+        let provider = self
+            .room
+            .e2ee_manager()
+            .key_provider()
+            .context("voice is not encrypted with channel keys")?;
+        for key in keys {
+            provider.set_shared_key(key.key.clone().into_bytes(), key.index);
+        }
+        apply_local_key_index(&self.room);
+        Ok(())
     }
 
     pub fn livekit_url(&self) -> &str {
@@ -528,6 +584,8 @@ async fn event_loop(
                     }
                 }
             }
+            // The SDK created the track's frame cryptor just before.
+            RoomEvent::LocalTrackPublished { .. } => apply_local_key_index(&room),
             RoomEvent::E2eeStateChanged { participant, state } => {
                 use livekit::webrtc::native::frame_cryptor::EncryptionState as S;
                 match state {

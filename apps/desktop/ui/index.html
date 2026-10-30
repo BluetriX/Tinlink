@@ -122,6 +122,13 @@
             <input id="low-latency" type="checkbox" checked> Low-latency video playback
           </label>
           <p id="low-latency-hint" class="muted" hidden>Takes effect after restarting Tinlink.</p>
+          <label>End-to-end encryption of voice and video
+            <select id="e2ee-mode">
+              <option value="off" selected>Off</option>
+              <option value="keys">With channel keys (preview)</option>
+            </select>
+          </label>
+          <p class="muted">Preview: everyone in the voice channel must choose the same, otherwise you do not hear each other. Takes effect on the next join.</p>
         </details>
       </section>
 

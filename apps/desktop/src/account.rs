@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tauri::{AppHandle, Manager, State};
 
 use crate::backend::{Account, Backend, SavedSession, unique_path};
-use crate::session::TokenResponse;
+use crate::session::{MediaKey, TokenResponse};
 use crate::{AppState, CmdResult, JoinInfo, StartupOptions, connect_voice, err};
 
 /// Largest image shown inline in the chat.
@@ -221,6 +221,7 @@ pub async fn join_voice(
     app: AppHandle,
     state: State<'_, AppState>,
     channel_id: String,
+    media_keys: Option<Vec<MediaKey>>,
 ) -> CmdResult<JoinInfo> {
     let token = {
         let guard = state.backend.lock().await;
@@ -228,5 +229,13 @@ pub async fn join_voice(
         backend.voice_token(&channel_id).await.map_err(chain)?
     };
     let token: TokenResponse = serde_json::from_value(token).map_err(err)?;
-    connect_voice(app, &state, token).await
+    connect_voice(app, &state, token, &media_keys.unwrap_or_default()).await
+}
+
+/// Hands newer media keys to the running call.
+#[tauri::command]
+pub async fn set_media_keys(state: State<'_, AppState>, keys: Vec<MediaKey>) -> CmdResult<()> {
+    let guard = state.session.lock().await;
+    let session = guard.as_ref().ok_or("not in voice")?;
+    session.set_media_keys(&keys).map_err(chain)
 }

@@ -222,8 +222,152 @@ $("logout").addEventListener("click", async () => {
   await run(() => invoke("logout"));
   voiceLeft();
   state.account = null;
+  state.keyring = null;
   showLogin();
 });
+
+// ------------------------------------------------------------- encryption
+// Same keys and flows as the web client, with its code (ui/shared is
+// copied from apps/web at build time); the Rust core only gets media keys.
+
+const e2ee = await import("./shared/e2ee.js");
+const { createKeyring } = await import("./shared/keyring.js");
+
+/** The core reports API errors as text; the keyring needs to see conflicts. */
+async function keyringApi(method, path, body) {
+  try {
+    return await api(method, path, body);
+  } catch (e) {
+    const error = new Error(String(e));
+    if (/already exists|does not follow the newest epoch/.test(error.message)) error.status = 409;
+    throw error;
+  }
+}
+
+/** Sets up this device's keys after login; asks for what is missing. */
+async function setupEncryption() {
+  const keyring = createKeyring({
+    api: keyringApi,
+    userId: myId(),
+    onWarning: (userId) => setStatus(
+      `The security key of ${displayNameOf(userId, "a member")} changed. Their devices get no keys until you check this with them.`, true),
+  });
+  state.keyring = keyring;
+  try {
+    let status = await keyring.setup("Tinlink desktop on Windows");
+    if (status === "revoked") status = await keyring.setup("Tinlink desktop on Windows");
+    if (state.keyring !== keyring) return;
+    if (status === "new_identity") await showRecoveryKey(await keyring.createIdentity());
+    else if (status === "pending") await approveThisDevice();
+    if (keyring.approved) {
+      await approvePendingDevices();
+      shareKeysSoon();
+    }
+  } catch (e) {
+    console.warn("encryption setup failed", e);
+    setStatus(`Encryption is not available: ${e.message || e}`, true);
+  }
+}
+
+async function showRecoveryKey(text) {
+  await ask({
+    title: "Your recovery key",
+    text: el("div", {},
+      el("p", { textContent: "Tinlink encrypts voice and messages end to end. This key restores your access on a new device or browser. Keep it in your password manager; nobody else, not even the server, can recover it for you." }),
+      el("p", {}, el("code", { class: "code", textContent: text }))),
+    fields: [{ id: "saved", label: "I have saved my recovery key", type: "checkbox" }],
+    cancel: false,
+    ok: "Done",
+    submit: (v) => (v.saved ? null : "Please save the key first."),
+  });
+}
+
+/** Asks for the recovery key, or for approval on another device. */
+async function approveThisDevice() {
+  const keyring = state.keyring;
+  const code = await keyring.code();
+  await ask({
+    title: "Approve this device",
+    text: el("div", {},
+      el("p", { textContent: "Your account is protected with end-to-end encryption. Enter your recovery key, or approve this device in Tinlink on a device or browser that is already approved. It shows this code:" }),
+      el("p", {}, el("code", { class: "code", textContent: code }))),
+    fields: [{ id: "recovery", label: "Recovery key", placeholder: "XXXX XXXX …" }],
+    ok: "Approve",
+    submit: (v) => {
+      if (keyring.approved) return null;
+      if (!v.recovery) return "Enter the recovery key, or approve on another device.";
+      return tryText(() => keyring.useRecoveryKey(v.recovery));
+    },
+  });
+  if (keyring.approved) {
+    setStatus("This device is approved for encryption");
+    shareKeysSoon();
+  }
+}
+
+/** Offers to approve own devices that wait for it. */
+async function approvePendingDevices({ explicit = false } = {}) {
+  const keyring = state.keyring;
+  if (!keyring?.canApprove) {
+    if (explicit) setStatus("Only a device that was set up with the recovery key can approve others.", true);
+    return;
+  }
+  const pending = await keyring.pendingDevices();
+  if (!pending.length && explicit) setStatus("No device is waiting for approval.");
+  for (const d of pending) {
+    const yes = await ask({
+      title: "Approve a new device?",
+      text: el("div", {},
+        el("p", { textContent: `"${d.name}" wants to read your encrypted channels. Approve it only if it shows this code:` }),
+        el("p", {}, el("code", { class: "code", textContent: d.code }))),
+      ok: "Approve",
+    });
+    if (yes) await run(() => keyring.approveDevice(d));
+  }
+}
+
+async function onKeysChanged(userId) {
+  const keyring = state.keyring;
+  if (!keyring) return;
+  if (userId === myId()) {
+    const wasApproved = keyring.approved;
+    const status = await keyring.refresh().catch(() => null);
+    if (!wasApproved && status === "ready") {
+      // Approved from another device while the dialog is open.
+      if ($("dialog").open && $("dialog-title").textContent === "Approve this device") $("dialog-cancel").click();
+      setStatus("This device is approved for encryption");
+    }
+    if (status === "revoked") setupEncryption();
+    else if (keyring.approved) approvePendingDevices();
+  }
+  shareKeysSoon();
+}
+
+async function onChannelKeysAdded(channelId) {
+  if (voiceEncrypted && state.voiceChannel?.id === channelId) {
+    await run(async () => {
+      await state.keyring.load(channelId);
+      await invoke("set_media_keys", { keys: await mediaKeysOf(channelId) });
+    });
+  }
+  shareKeysSoon();
+}
+
+/**
+ * Shares channel keys with new members and devices. Every approved device
+ * does this; the server ignores keys someone else delivered first.
+ */
+function shareKeysSoon() {
+  clearTimeout(shareKeysSoon.timer);
+  shareKeysSoon.timer = setTimeout(async () => {
+    const keyring = state.keyring;
+    if (!keyring?.approved) return;
+    const channels = [...state.channels.map((c) => c.id), ...state.dms.map((d) => d.id)];
+    for (const id of channels) {
+      await keyring.shareMissing(id).catch((e) => console.warn("sharing keys failed", id, e));
+    }
+  }, 1500 + Math.random() * 1500);
+}
 
 // ------------------------------------------------------------------ main
 
@@ -239,6 +383,7 @@ async function showMain(account) {
   await loadCameras();
   $("dm-button").parentElement.hidden = !account;
   if (!account) return;
+  setupEncryption();
   await loadGroups();
   await loadDms();
   const saved = settings.load();
@@ -1234,6 +1379,7 @@ $("profile").addEventListener("click", async () => {
   };
   removeButton.onclick = () => run(() => setAvatar(null));
   let wantsPassword = false;
+  let wantsEncryption = false;
   const done = await ask({
     title: "Your profile",
     text: el("div", {},
@@ -1242,6 +1388,15 @@ $("profile").addEventListener("click", async () => {
         el("button", { type: "button", class: "small", textContent: "Choose picture…", onclick: () => run(() => chooseAndUpload(setAvatar)) }),
         removeButton),
       el("p", { class: "muted", textContent: `User name: @${user.name} (cannot be changed)` }),
+      el("p", { class: "muted" },
+        state.keyring?.approved ? "Encryption: this device is approved. " : "Encryption: this device is not approved yet. ",
+        el("button", {
+          type: "button", class: "small", textContent: state.keyring?.approved ? "Approve another device…" : "Approve…",
+          onclick: () => {
+            wantsEncryption = true;
+            $("dialog-cancel").click();
+          },
+        })),
       el("button", {
         type: "button", class: "small", textContent: "Change password…",
         onclick: () => {
@@ -1259,6 +1414,10 @@ $("profile").addEventListener("click", async () => {
   });
   if (done) setStatus("Profile saved");
   if (wantsPassword) changePassword();
+  if (wantsEncryption) {
+    if (state.keyring?.approved) approvePendingDevices({ explicit: true });
+    else approveThisDevice();
+  }
 });
 
 async function changePassword() {
@@ -1882,6 +2041,12 @@ listen("gateway", (ev) => {
         } else if (inGroup) refreshGroup();
       });
       break;
+    case "keys_changed":
+      onKeysChanged(e.user_id);
+      break;
+    case "channel_keys_added":
+      onChannelKeysAdded(e.channel_id);
+      break;
     case "resync":
       loadGroups();
       loadDms();
@@ -1892,6 +2057,7 @@ listen("gateway", (ev) => {
       // channel_created/updated/deleted, member_joined, group_updated
       if (inGroup) refreshGroup();
       if (e.type === "group_updated") loadGroups();
+      if (e.type === "group_updated" || e.type === "member_joined") shareKeysSoon();
   }
 });
 
@@ -1937,13 +2103,34 @@ listen("muted-speech", () => {
   playMutedBeep.timer = setTimeout(() => { $("muted-hint").hidden = true; }, 6000);
 });
 
+/** Whether the running call uses channel keys (and needs newer ones). */
+let voiceEncrypted = false;
+
+/** Media keys of a channel's epochs for the Rust core, newest last; null when off. */
+async function channelMediaKeys(ch) {
+  if (settings.load().e2eeMode !== "keys") return null;
+  if (!state.keyring?.approved) throw new Error("Approve this device for encryption first (your profile).");
+  await state.keyring.current(ch.id);
+  return mediaKeysOf(ch.id);
+}
+
+async function mediaKeysOf(channelId) {
+  const out = [];
+  for (const [epoch, key] of state.keyring.known(channelId).slice(-16)) {
+    out.push({ index: e2ee.mediaKeyIndex(epoch), key: e2ee.toBase64(await e2ee.mediaKey(key, channelId)) });
+  }
+  return out;
+}
+
 /** Joins a channel's voice; returns whether it worked. */
 async function joinVoice(ch, { quiet = false } = {}) {
   unlockAudio();
   if (!quiet) setStatus(`Joining ${ch.name}…`);
   let info;
   try {
-    info = await invoke("join_voice", { channelId: ch.id });
+    const mediaKeys = await channelMediaKeys(ch);
+    info = await invoke("join_voice", { channelId: ch.id, mediaKeys });
+    voiceEncrypted = !!mediaKeys;
   } catch (e) {
     if (!quiet) setStatus(String(e), true);
     return false;
@@ -2432,6 +2619,8 @@ async function init() {
   if (saved.shareFps) $("share-fps").value = saved.shareFps;
   if (saved.shareCapture) $("share-capture").value = saved.shareCapture;
   const early = await invoke("early_prefs");
+  $("e2ee-mode").value = settings.load().e2eeMode || "off";
+  $("e2ee-mode").addEventListener("change", () => settings.save({ e2eeMode: $("e2ee-mode").value }));
   $("low-latency").checked = early.lowLatencyPlayback;
   $("low-latency").addEventListener("change", async () => {
     const lowLatencyPlayback = $("low-latency").checked;

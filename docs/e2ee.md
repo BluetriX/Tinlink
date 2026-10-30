@@ -1,8 +1,10 @@
 # End-to-end encryption
 
-Status: the server stores keys; the web client sets up devices, the
-recovery key and channel keys, and can encrypt voice with channel keys
-(opt-in while the desktop client only knows the test key from the README).
+Status: the server stores keys; the web and the desktop client set up
+devices, the recovery key and channel keys, and can encrypt voice, webcams
+and screen shares with channel keys (opt-in in the voice settings for now).
+The desktop UI runs the web client's `e2ee.js` and `keyring.js` (copied by
+its build script) and hands only the derived media keys to the Rust core.
 Messages and files are not encrypted yet.
 
 The server stores public keys and wrapped channel keys and decides who may

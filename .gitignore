@@ -6,3 +6,4 @@
 
 # Local release builds for testers
 /dist
+/apps/desktop/ui/shared

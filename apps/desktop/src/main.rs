@@ -141,6 +141,7 @@ async fn connect_voice(
     app: AppHandle,
     state: &AppState,
     token: session::TokenResponse,
+    media_keys: &[session::MediaKey],
 ) -> CmdResult<JoinInfo> {
     // The session lock is not held while connecting: other commands
     // (devices, mute, ...) must not wait for a slow or failing join.
@@ -149,9 +150,16 @@ async fn connect_voice(
         old.leave(&state.voice).await;
     }
     let audio = state.platform_audio()?;
-    let session = Session::join(app, token, audio, &state.voice, &state.audio_prefs)
-        .await
-        .map_err(|e| format!("{e:#}"))?;
+    let session = Session::join(
+        app,
+        token,
+        audio,
+        &state.voice,
+        &state.audio_prefs,
+        media_keys,
+    )
+    .await
+    .map_err(|e| format!("{e:#}"))?;
     let info = JoinInfo {
         identity: session.identity().to_owned(),
         livekit_url: session.livekit_url().to_owned(),
@@ -177,7 +185,7 @@ async fn dev_join(
     let token = session::fetch_token(&server, &name, &room)
         .await
         .map_err(|e| format!("{e:#}"))?;
-    connect_voice(app, &state, token).await
+    connect_voice(app, &state, token, &[]).await
 }
 
 #[tauri::command]
@@ -503,6 +511,7 @@ fn main() {
             account::download,
             account::image_data,
             account::join_voice,
+            account::set_media_keys,
             account::send_typing,
             leave,
             set_voice_mode,
