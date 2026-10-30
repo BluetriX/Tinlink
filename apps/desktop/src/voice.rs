@@ -35,6 +35,8 @@ struct Inner {
     /// Voice activation gate, driven by the microphone monitor.
     va_open: bool,
     threshold_db: f32,
+    /// The user muted the microphone: nothing is sent, whatever the mode.
+    self_muted: bool,
     /// The published track and the runtime it belongs to: muting spawns
     /// tasks, but the hotkey handler runs on the (non-Tokio) main thread.
     mic: Option<(LocalAudioTrack, tokio::runtime::Handle)>,
@@ -47,6 +49,7 @@ impl Default for Inner {
             ptt_down: false,
             va_open: false,
             threshold_db: DEFAULT_THRESHOLD_DB,
+            self_muted: false,
             mic: None,
         }
     }
@@ -54,6 +57,9 @@ impl Default for Inner {
 
 impl Inner {
     fn transmitting(&self) -> bool {
+        if self.self_muted {
+            return false;
+        }
         match self.mode {
             VoiceMode::PushToTalk => self.ptt_down,
             VoiceMode::VoiceActivation => self.va_open,
@@ -78,6 +84,12 @@ impl Voice {
     pub fn set_mode(&self, mode: VoiceMode) {
         let mut inner = self.inner.lock().unwrap();
         inner.mode = mode;
+        inner.apply();
+    }
+
+    pub fn set_self_muted(&self, muted: bool) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.self_muted = muted;
         inner.apply();
     }
 
@@ -178,6 +190,18 @@ mod tests {
         i.va_open = false;
         i.ptt_down = true;
         assert!(!i.transmitting());
+    }
+
+    #[test]
+    fn self_mute_overrides_every_mode() {
+        let mut i = inner(VoiceMode::PushToTalk, true);
+        i.self_muted = true;
+        assert!(!i.transmitting());
+        i.mode = VoiceMode::VoiceActivation;
+        i.va_open = true;
+        assert!(!i.transmitting());
+        i.self_muted = false;
+        assert!(i.transmitting());
     }
 
     #[test]

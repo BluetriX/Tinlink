@@ -92,26 +92,34 @@ struct Source {
 struct SourceState {
     prefs: ListenPrefs,
     muted: bool,
+    /// The user turned off all incoming audio.
+    deafened: bool,
     compressor: Compressor,
     buffer: JitterBuffer,
+}
+
+impl SourceState {
+    fn silent(&self) -> bool {
+        self.muted || self.deafened
+    }
 }
 
 impl Source {
     /// Mutes the track in WebRTC's playout when muted or played by us.
     fn apply(&self) {
         let mut state = self.state.lock().unwrap();
-        let own = !state.muted && state.prefs.needs_own_playout();
+        let own = !state.silent() && state.prefs.needs_own_playout();
         let preset = state.prefs.compressor;
         state.compressor.set_preset(preset);
         if !own {
             state.buffer.clear();
         }
-        self.track.set_enabled(!state.muted && !own);
+        self.track.set_enabled(!state.silent() && !own);
     }
 
     fn own_playout(&self) -> bool {
         let state = self.state.lock().unwrap();
-        !state.muted && state.prefs.needs_own_playout()
+        !state.silent() && state.prefs.needs_own_playout()
     }
 }
 
@@ -127,6 +135,7 @@ pub struct RemoteAudio {
     sources: Arc<Mutex<Vec<Arc<Source>>>>,
     output: Mutex<Option<Output>>,
     output_device: Mutex<Option<String>>,
+    deafened: AtomicBool,
 }
 
 impl RemoteAudio {
@@ -138,6 +147,7 @@ impl RemoteAudio {
             sources: Arc::default(),
             output: Mutex::default(),
             output_device: Mutex::new(output_device),
+            deafened: AtomicBool::new(false),
         }
     }
 
@@ -149,6 +159,7 @@ impl RemoteAudio {
             state: Mutex::new(SourceState {
                 prefs,
                 muted,
+                deafened: self.deafened.load(Ordering::Relaxed),
                 ..Default::default()
             }),
         });
@@ -186,6 +197,23 @@ impl RemoteAudio {
 
     pub fn set_muted(&self, identity: &str, muted: bool) {
         self.change(identity, |state| state.muted = muted);
+    }
+
+    /// Turns all incoming audio off or on again (per-person mutes stay).
+    pub fn set_deafened(&self, deafened: bool) {
+        self.deafened.store(deafened, Ordering::Relaxed);
+        let sources: Vec<_> = self
+            .taps
+            .lock()
+            .unwrap()
+            .values()
+            .map(|t| t.source.clone())
+            .collect();
+        for source in sources {
+            source.state.lock().unwrap().deafened = deafened;
+            source.apply();
+        }
+        self.update_output();
     }
 
     fn change(&self, identity: &str, f: impl FnOnce(&mut SourceState)) {
@@ -246,7 +274,7 @@ async fn tap(
         samples.extend(frame.data.iter().map(|&s| f32::from(s) / 32768.0));
         speakers.record(&identity, dsp::rms_db(samples.iter().copied()));
         let mut state = source.state.lock().unwrap();
-        if state.muted || !state.prefs.needs_own_playout() {
+        if state.silent() || !state.prefs.needs_own_playout() {
             continue;
         }
         state.compressor.process(&mut samples);

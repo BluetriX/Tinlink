@@ -221,6 +221,54 @@ def talking_muted():
     return tr.lowpass(2500)
 
 
+def blip_pair(first, second, *, wave="triangle", gap=0.07, dur=0.1, cutoff=6000):
+    """Two short notes: up = on, down = off."""
+    tr = Track(0.4)
+    tr.tone(0.0, dur, note_freq(first), wave=wave, gain=0.8, release=dur * 0.5)
+    tr.tone(gap, dur * 1.4, note_freq(second), wave=wave, gain=0.8)
+    return tr.lowpass(cutoff).echo(0.06, 0.2, 0.25)
+
+
+def logged_in():
+    tr = Track(0.8)
+    for i, n in enumerate(["C5", "E5", "G5", "C6"]):
+        d = 0.09 if i < 3 else 0.3
+        tr.tone(i * 0.08, d, note_freq(n), wave="pulse", duty=0.25, gain=0.5)
+        tr.tone(i * 0.08, d, note_freq(n), wave="triangle", gain=0.5)
+    return tr.lowpass(6000).echo(0.09, 0.3, 0.35)
+
+
+def channel_switched():
+    tr = Track(0.45)
+    tr.tone(0.0, 0.08, 520, glide_to=880, wave="triangle", gain=0.8, release=0.03)
+    tr.tone(0.09, 0.16, note_freq("E6"), wave="triangle", gain=0.7)
+    return tr.lowpass(6000).echo(0.08, 0.25, 0.3)
+
+
+def reconnected():
+    tr = Track(0.55)
+    for i, n in enumerate(["D#4", "F#4", "A4", "D5"]):
+        tr.tone(i * 0.07, 0.08 if i < 3 else 0.22, note_freq(n), wave="pulse", duty=0.5, gain=0.5, release=0.04 if i < 3 else None)
+    return tr.lowpass(3500).echo(0.1, 0.3, 0.3)
+
+
+def fanfare(notes, step=0.08, last=0.3, cutoff=7000):
+    tr = Track(step * len(notes) + last + 0.35)
+    for i, n in enumerate(notes):
+        d = 0.1 if i < len(notes) - 1 else last
+        tr.tone(i * step, d, note_freq(n), wave="pulse", duty=0.125, gain=0.35)
+        tr.tone(i * step, d, note_freq(n), wave="triangle", gain=0.7)
+    return tr.lowpass(cutoff).echo(0.09, 0.3, 0.35)
+
+
+def buzz(notes, step=0.12, cutoff=2500):
+    tr = Track(step * len(notes) + 0.45)
+    for i, n in enumerate(notes):
+        tr.tone(i * step, step * 0.85 if i < len(notes) - 1 else 0.25, note_freq(n),
+                wave="pulse", duty=0.5, gain=0.6, vibrato=0.01, release=0.04 if i < len(notes) - 1 else None)
+    return tr.lowpass(cutoff).echo(0.1, 0.25, 0.3)
+
+
 # name -> (builder, peak level in dBFS); levels balance perceived loudness.
 RETRO = {
     "connected": (connected, -6),
@@ -232,6 +280,21 @@ RETRO = {
     "connection-lost": (connection_lost, -8),
     "message": (message, -8),
     "talking-muted": (talking_muted, -13),
+    "logged-in": (logged_in, -6),
+    "channel-switched": (channel_switched, -7),
+    "reconnected": (reconnected, -7),
+    "mic-muted": (lambda: blip_pair("A5", "E5"), -8),
+    "mic-unmuted": (lambda: blip_pair("E5", "A5"), -8),
+    "sound-muted": (lambda: blip_pair("E5", "A4", wave="pulse", cutoff=3000), -10),
+    "sound-unmuted": (lambda: blip_pair("A4", "E5", wave="pulse", cutoff=3000), -10),
+    "role-granted": (lambda: fanfare(["G5", "B5", "D6"]), -7),
+    "role-revoked": (lambda: fanfare(["D6", "B5", "G5"], cutoff=5000), -7),
+    "admin-granted": (lambda: fanfare(["G5", "B5", "D6", "G6"]), -7),
+    "admin-revoked": (lambda: fanfare(["G6", "D6", "B5", "G5"], cutoff=5000), -7),
+    "registered": (lambda: fanfare(["C5", "G5", "E6"], step=0.1, last=0.35), -7),
+    "registration-failed": (lambda: buzz(["E4", "C4"]), -7),
+    "wrong-password": (lambda: buzz(["A3", "A3"], step=0.1), -7),
+    "error": (lambda: buzz(["F4", "B3"]), -7),
 }
 
 
@@ -334,6 +397,21 @@ ANNOUNCER = {
     "connection-lost": (announce("Connection lost"), -4),
     "message": (announce("New message"), -5),
     "talking-muted": (announce("You are muted"), -6),
+    "logged-in": (announce("Welcome"), -4),
+    "channel-switched": (announce("Channel switched"), -4),
+    "reconnected": (announce("Connection restored"), -4),
+    "mic-muted": (announce("Microphone muted"), -4),
+    "mic-unmuted": (announce("Microphone on"), -4),
+    "sound-muted": (announce("Sound muted"), -4),
+    "sound-unmuted": (announce("Sound on"), -4),
+    "role-granted": (announce("Role granted"), -4),
+    "role-revoked": (announce("Role revoked"), -4),
+    "admin-granted": (announce("Administrator granted"), -4),
+    "admin-revoked": (announce("Administrator revoked"), -4),
+    "registered": (announce("Account created"), -4),
+    "registration-failed": (announce("Account not created"), -4),
+    "wrong-password": (announce("Wrong password"), -4),
+    "error": (announce("Error"), -4),
 }
 
 PACKS = {"retro": RETRO, "announcer": ANNOUNCER}

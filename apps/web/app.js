@@ -9,7 +9,7 @@ import { createSettings, hasSettings } from "./admin.js";
 import { avatar, chooseAndUpload, imageUrl, initials } from "./images.js";
 import { createKeyring } from "./keyring.js";
 import { mediaKey, mediaKeyIndex, openFile, sealFile, toBase64 } from "./e2ee.js";
-import { createSounds } from "./sounds.js";
+import { browserPacks, createSounds } from "./sounds.js";
 
 const LK = window.LivekitClient;
 
@@ -72,7 +72,12 @@ const settings = {
   save: (patch) => store.set("tinlink.settings", { ...settings.load(), ...patch }),
 };
 
-const sounds = createSounds({ load: () => settings.load(), save: (patch) => settings.save(patch) });
+const sounds = createSounds({
+  load: () => settings.load(),
+  save: (patch) => settings.save(patch),
+  // Packs picked from a folder live in this browser only.
+  local: "indexedDB" in window ? browserPacks() : null,
+});
 
 const state = {
   session: null, // { token, user }
@@ -252,9 +257,12 @@ $("login-form").addEventListener("submit", async (ev) => {
     state.session = { token: session.token, user: session.user };
     store.set("tinlink.session", state.session);
     settings.save({ userName: name });
+    sounds.play(registering ? "registered" : "logged-in");
     await showMain();
   } catch (e) {
     $("login-error").textContent = e.status === 401 ? "Wrong user name or password." : e.message;
+    if (registering) sounds.play("registration-failed");
+    else sounds.play(e.status === 401 ? "wrong-password" : "error");
   } finally {
     $("login-submit").disabled = false;
   }
@@ -1521,6 +1529,7 @@ function onGatewayEvent(e) {
         refreshGroups();
         shareKeysSoon();
       }
+      if (e.type === "group_updated") playRoleChange(e);
   }
 }
 
@@ -1767,6 +1776,7 @@ function voiceMode() {
 }
 
 function transmitting() {
+  if (settings.load().selfMuted) return false;
   return voiceMode() === "pushToTalk" ? voice.pttDown : voice.vaOpen;
 }
 
@@ -1918,6 +1928,8 @@ let e2eeWorker = null;
 async function joinVoice(ch, { quiet = false, sound = "connected" } = {}) {
   unlockAudio();
   if (!quiet) setStatus(`Joining ${ch.name}…`);
+  // Joining from another voice channel is a switch.
+  if (sound === "connected" && voice.channel && voice.channel.id !== ch.id) sound = "channel-switched";
   try {
     const token = await api("POST", `/channels/${ch.id}/voice-token`, {});
     await leaveVoice({ keepRejoin: true });
@@ -1943,7 +1955,10 @@ async function joinVoice(ch, { quiet = false, sound = "connected" } = {}) {
     await publishMic();
   } catch (e) {
     await leaveVoice({ keepRejoin: true });
-    if (!quiet) setStatus(`Cannot join voice: ${e.message || e}`, true);
+    if (!quiet) {
+      setStatus(`Cannot join voice: ${e.message || e}`, true);
+      sounds.play("error");
+    }
     return false;
   }
   cancelRejoin();
@@ -2067,6 +2082,38 @@ function wireRoom(room) {
     });
 }
 
+/** A role was given to or taken from us. */
+function playRoleChange(e) {
+  if (e.data?.user_id !== state.session?.user.id || typeof e.data.assigned !== "boolean") return;
+  const kind = e.data.admin ? "admin" : "role";
+  sounds.play(`${kind}-${e.data.assigned ? "granted" : "revoked"}`);
+}
+
+// Own microphone and incoming sound, kept across reloads.
+function showSelfMute() {
+  const { selfMuted = false, deafened = false } = settings.load();
+  $("mic-mute").textContent = selfMuted ? "Mic off" : "Mic on";
+  $("mic-mute").classList.toggle("on", selfMuted);
+  $("deafen").textContent = deafened ? "Sound off" : "Sound on";
+  $("deafen").classList.toggle("on", deafened);
+}
+
+$("mic-mute").addEventListener("click", () => {
+  const muted = !settings.load().selfMuted;
+  settings.save({ selfMuted: muted });
+  applyTransmit();
+  showSelfMute();
+  sounds.play(muted ? "mic-muted" : "mic-unmuted");
+});
+
+$("deafen").addEventListener("click", () => {
+  const deafened = !settings.load().deafened;
+  settings.save({ deafened });
+  for (const p of voice.room?.remoteParticipants.values() || []) applyVolume(p);
+  showSelfMute();
+  sounds.play(deafened ? "sound-muted" : "sound-unmuted");
+});
+
 /** Someone else's voice event in the channel we are talking in. */
 function inMyVoiceChannel(e) {
   return e.channel_id === voice.channel?.id && e.data.user_id !== state.session?.user.id;
@@ -2167,13 +2214,14 @@ function scheduleRejoin(ch, attempt) {
   clearTimeout(rejoinTimer);
   if (attempt >= REJOIN_DELAYS.length) {
     setStatus(`Could not reconnect to ${ch.name}`, true);
+    sounds.play("error");
     return;
   }
   const delay = REJOIN_DELAYS[attempt];
   setStatus(`Voice connection lost, reconnecting in ${delay} s…`, true);
   rejoinTimer = setTimeout(async () => {
     if (voice.room) return;
-    if (!(await joinVoice(ch, { quiet: true }))) scheduleRejoin(ch, attempt + 1);
+    if (!(await joinVoice(ch, { quiet: true, sound: "reconnected" }))) scheduleRejoin(ch, attempt + 1);
   }, delay * 1000);
 }
 
@@ -2222,7 +2270,7 @@ function applyVolume(participant) {
     }
     for (const node of track.attachedElements) node.muted = webAudio;
   }
-  const muted = localMutes().has(id);
+  const muted = localMutes().has(id) || !!settings.load().deafened;
   participant.setVolume(muted ? 0 : webAudio ? volume : Math.min(volume, 1));
 }
 
@@ -2680,6 +2728,7 @@ async function init() {
   if (saved.cameraQuality) $("camera-quality").value = saved.cameraQuality;
   sounds.setSink(saved.outputDevice);
   $("sound-settings").append(sounds.renderSettings(el));
+  showSelfMute();
   $("camera-quality").addEventListener("change", () => settings.save({ cameraQuality: $("camera-quality").value }));
   $("share-resolution").addEventListener("change", () => settings.save({ shareResolution: $("share-resolution").value }));
   $("share-fps").addEventListener("change", () => settings.save({ shareFps: $("share-fps").value }));

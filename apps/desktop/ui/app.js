@@ -62,7 +62,61 @@ const settings = {
   },
 };
 
-const sounds = createSounds({ load: () => settings.load(), save: (patch) => settings.save(patch) });
+/** Sound packs from folders on this computer (folder of <sound>.wav files). */
+const folderPacks = {
+  async list() {
+    const packs = await invoke("local_sound_packs", { folders: settings.load().soundFolders || [] });
+    return packs.map((p) => ({ id: `folder:${p.path}`, label: p.name, sounds: p.sounds }));
+  },
+  async url(packId, soundId) {
+    const data = await invoke("local_sound", { folder: packId.slice("folder:".length), id: soundId });
+    return URL.createObjectURL(new Blob([data], { type: "audio/wav" }));
+  },
+  renderAdd(el, refresh) {
+    const path = el("input", { id: "sound-folder", placeholder: "Folder, e.g. C:\\sounds\\mypack", size: 24 });
+    const status = el("span", { class: "muted" });
+    const add = el("button", {
+      type: "button", class: "small", textContent: "Add folder",
+      onclick: async () => {
+        const folder = path.value.trim();
+        if (!folder) return;
+        const [pack] = await invoke("local_sound_packs", { folders: [folder] });
+        if (!pack) {
+          status.textContent = "Cannot read that folder.";
+          return;
+        }
+        if (!pack.sounds.length) {
+          status.textContent = "No <sound>.wav files in that folder.";
+          return;
+        }
+        const folders = new Set(settings.load().soundFolders || []);
+        folders.add(folder);
+        settings.save({ soundFolders: [...folders] });
+        status.textContent = `Added "${pack.name}" with ${pack.sounds.length} sounds.`;
+        path.value = "";
+        await refresh();
+      },
+    });
+    const remove = el("button", {
+      type: "button", class: "small", textContent: "Remove pack",
+      title: "Forgets the chosen folder pack (the files stay)",
+      onclick: async () => {
+        const id = $("sound-pack")?.value || "";
+        if (!id.startsWith("folder:")) {
+          status.textContent = "Choose a folder pack first.";
+          return;
+        }
+        const folder = id.slice("folder:".length);
+        settings.save({ soundFolders: (settings.load().soundFolders || []).filter((f) => f !== folder) });
+        status.textContent = "Pack removed.";
+        await refresh();
+      },
+    });
+    return el("div", { class: "row" }, path, add, remove, status);
+  },
+};
+
+const sounds = createSounds({ load: () => settings.load(), save: (patch) => settings.save(patch), local: folderPacks });
 
 /** Permission sets arrive as "VIEW_CHANNEL | SEND_MESSAGES". */
 function can(perms, flag) {
@@ -197,9 +251,12 @@ $("login-form").addEventListener("submit", async (ev) => {
       ? await invoke("register", { server, name, password, displayName: $("login-display").value.trim() || null })
       : await invoke("login", { server, name, password });
     settings.save({ server, userName: name });
+    sounds.play(registering ? "registered" : "logged-in");
     await showMain(account);
   } catch (e) {
     $("login-error").textContent = String(e);
+    if (registering) sounds.play("registration-failed");
+    else sounds.play(/401|password|unauthori/i.test(String(e)) ? "wrong-password" : "error");
   } finally {
     $("login-submit").disabled = false;
   }
@@ -2186,8 +2243,16 @@ listen("gateway", (ev) => {
       if (inGroup) refreshGroup();
       if (e.type === "group_updated") loadGroups();
       if (e.type === "group_updated" || e.type === "member_joined") shareKeysSoon();
+      if (e.type === "group_updated") playRoleChange(e);
   }
 });
+
+/** A role was given to or taken from us. */
+function playRoleChange(e) {
+  if (e.data?.user_id !== myId() || typeof e.data.assigned !== "boolean") return;
+  const kind = e.data.admin ? "admin" : "role";
+  sounds.play(`${kind}-${e.data.assigned ? "granted" : "revoked"}`);
+}
 
 /** Someone else's voice event in the channel we are talking in. */
 function inMyVoiceChannel(e) {
@@ -2230,23 +2295,28 @@ async function mediaKeysOf(channelId) {
 
 /**
  * Joins a channel's voice; returns whether it worked. `sound` is played on
- * success ("moved" when a moderator moved us).
+ * success ("moved" when a moderator moved us, "reconnected" after a loss);
+ * a switch from another voice channel plays "channel-switched".
  */
 async function joinVoice(ch, { quiet = false, sound = "connected" } = {}) {
   if (!quiet) setStatus(`Joining ${ch.name}…`);
+  const switching = !!state.voiceChannel && state.voiceChannel.id !== ch.id;
   let info;
   try {
     const mediaKeys = await channelMediaKeys(ch);
     info = await invoke("join_voice", { channelId: ch.id, mediaKeys });
     voiceEncrypted = !!mediaKeys;
   } catch (e) {
-    if (!quiet) setStatus(String(e), true);
+    if (!quiet) {
+      setStatus(String(e), true);
+      sounds.play("error");
+    }
     return false;
   }
   cancelRejoin();
   setStatus(`Connected to voice in ${ch.name}`);
   voiceJoined(ch);
-  sounds.play(sound);
+  sounds.play(sound === "connected" && switching ? "channel-switched" : sound);
   // Rejoined automatically after a connection loss or app restart.
   settings.save({ lastVoice: { groupId: ch.group_id, channelId: ch.id } });
   return !!info;
@@ -2295,6 +2365,32 @@ function voiceLeft() {
   $("meter-fill").style.width = "0";
   updateSpeaking();
 }
+
+// Own microphone and incoming sound, kept across restarts.
+function showSelfMute() {
+  const { selfMuted = false, deafened = false } = settings.load();
+  $("mic-mute").textContent = selfMuted ? "Mic off" : "Mic on";
+  $("mic-mute").classList.toggle("on", selfMuted);
+  $("deafen").textContent = deafened ? "Sound off" : "Sound on";
+  $("deafen").classList.toggle("on", deafened);
+}
+
+$("mic-mute").addEventListener("click", async () => {
+  const muted = !settings.load().selfMuted;
+  settings.save({ selfMuted: muted });
+  await run(() => invoke("set_self_mute", { muted }));
+  showSelfMute();
+  sounds.play(muted ? "mic-muted" : "mic-unmuted");
+});
+
+$("deafen").addEventListener("click", async () => {
+  const deafened = !settings.load().deafened;
+  settings.save({ deafened });
+  await run(() => invoke("set_deafened", { deafened }));
+  showSelfMute();
+  // Played after unmuting / before muting, so it is heard either way.
+  sounds.play(deafened ? "sound-muted" : "sound-unmuted");
+});
 
 $("voice-leave").addEventListener("click", async () => {
   cancelRejoin();
@@ -2628,13 +2724,14 @@ function scheduleRejoin(ch, attempt) {
   clearTimeout(rejoinTimer);
   if (attempt >= REJOIN_DELAYS.length) {
     setStatus(`Could not reconnect to ${ch.name}`, true);
+    sounds.play("error");
     return;
   }
   const delay = REJOIN_DELAYS[attempt];
   setStatus(`Voice connection lost, reconnecting in ${delay} s…`, true);
   rejoinTimer = setTimeout(async () => {
     if (state.voiceChannel) return; // joined something else meanwhile
-    const ok = await joinVoice(ch, { quiet: true });
+    const ok = await joinVoice(ch, { quiet: true, sound: "reconnected" });
     if (!ok) scheduleRejoin(ch, attempt + 1);
     // A join on a stuck engine connects but carries no audio.
     else await restartIfAudioStuck();
@@ -2751,6 +2848,9 @@ async function init() {
   });
   if (saved.cameraQuality) $("camera-quality").value = saved.cameraQuality;
   $("sound-settings").append(sounds.renderSettings(el));
+  if (saved.selfMuted) await invoke("set_self_mute", { muted: true });
+  if (saved.deafened) await invoke("set_deafened", { deafened: true });
+  showSelfMute();
   const threshold = saved.vaThreshold ?? -50;
   $("va-threshold").value = String(threshold);
   showThreshold(threshold);

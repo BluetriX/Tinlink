@@ -14,6 +14,7 @@ mod prefs;
 mod ptt;
 mod screen;
 mod session;
+mod sounds;
 mod stats;
 mod viewer;
 mod voice;
@@ -41,6 +42,8 @@ struct AppState {
     locally_muted: std::sync::Mutex<std::collections::HashSet<String>>,
     /// Volume and compressor per participant (by identity), for this client.
     listen_prefs: std::sync::Mutex<std::collections::HashMap<String, listen::ListenPrefs>>,
+    /// All incoming voice audio is off.
+    deafened: std::sync::atomic::AtomicBool,
 }
 
 /// Errors cross the IPC boundary as plain strings.
@@ -269,6 +272,25 @@ async fn record_ptt_key(state: State<'_, AppState>) -> CmdResult<String> {
     Ok(name)
 }
 
+/// Mutes or unmutes the own microphone, whatever push-to-talk or voice
+/// activation say.
+#[tauri::command]
+fn set_self_mute(state: State<'_, AppState>, muted: bool) {
+    state.voice.set_self_muted(muted);
+}
+
+/// Turns all incoming voice audio off or on.
+#[tauri::command]
+async fn set_deafened(state: State<'_, AppState>, deafened: bool) -> CmdResult<()> {
+    state
+        .deafened
+        .store(deafened, std::sync::atomic::Ordering::Relaxed);
+    if let Some(session) = state.session.lock().await.as_ref() {
+        session.set_deafened(deafened);
+    }
+    Ok(())
+}
+
 /// Mutes or unmutes a participant for this client only.
 #[tauri::command]
 async fn set_local_mute(
@@ -473,6 +495,7 @@ fn main() {
             ptt_key: ptt::PttKey::default(),
             locally_muted: Default::default(),
             listen_prefs: Default::default(),
+            deafened: Default::default(),
             platform_audio: Default::default(),
         })
         .setup(|app| {
@@ -523,7 +546,11 @@ fn main() {
             set_ptt_key,
             record_ptt_key,
             set_local_mute,
+            set_self_mute,
+            set_deafened,
             set_listen_prefs,
+            sounds::local_sound_packs,
+            sounds::local_sound,
             notify,
             restart_app,
             watch_screen,

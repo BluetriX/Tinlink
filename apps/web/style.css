@@ -462,6 +462,12 @@ label.inline input {
   opacity: 0.5;
 }
 
+/* Own microphone / incoming sound turned off */
+button.toggle.on {
+  border-color: var(--error);
+  color: var(--error);
+}
+
 /* Chat */
 
 #chat {

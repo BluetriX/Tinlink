@@ -292,6 +292,11 @@ impl Session {
             speakers.clone(),
             audio_prefs.output_name(&audio),
         ));
+        remote_audio.set_deafened(
+            app.state::<AppState>()
+                .deafened
+                .load(std::sync::atomic::Ordering::Relaxed),
+        );
         let speaking = speaking_check(&app, &room, &speakers);
 
         let mic_id = mic.rtc_track().id();
@@ -366,6 +371,10 @@ impl Session {
 
     pub fn set_local_mute(&self, identity: &str, muted: bool) {
         self.remote_audio.set_muted(identity, muted);
+    }
+
+    pub fn set_deafened(&self, deafened: bool) {
+        self.remote_audio.set_deafened(deafened);
     }
 
     pub fn set_listen_prefs(&self, identity: &str, prefs: ListenPrefs) {

@@ -143,6 +143,14 @@ async fn load_role(state: &AppState, group_id: Uuid, role_id: Uuid) -> AppResult
         .ok_or(AppError::NotFound)
 }
 
+async fn role_is_admin(state: &AppState, role_id: Uuid) -> AppResult<bool> {
+    let permissions: i64 = sqlx::query_scalar("SELECT permissions FROM roles WHERE id = $1")
+        .bind(role_id)
+        .fetch_one(&state.db)
+        .await?;
+    Ok(from_db(permissions).contains(Permissions::ADMINISTRATOR))
+}
+
 pub async fn update(
     State(state): State<AppState>,
     user: AuthUser,
@@ -237,10 +245,12 @@ pub async fn assign(
         .bind(role_id)
         .execute(&state.db)
         .await?;
+    // The member's client announces the change ("admin" picks the sound).
+    let admin = role_is_admin(&state, role_id).await?;
     state.events.group(
         EventKind::GroupUpdated,
         group_id,
-        json!({ "user_id": target }),
+        json!({ "user_id": target, "role_id": role_id, "assigned": true, "admin": admin }),
     );
     Ok(StatusCode::NO_CONTENT)
 }
@@ -257,10 +267,12 @@ pub async fn unassign(
         .bind(role_id)
         .execute(&state.db)
         .await?;
+    // The member's client announces the change ("admin" picks the sound).
+    let admin = role_is_admin(&state, role_id).await?;
     state.events.group(
         EventKind::GroupUpdated,
         group_id,
-        json!({ "user_id": target }),
+        json!({ "user_id": target, "role_id": role_id, "assigned": false, "admin": admin }),
     );
     Ok(StatusCode::NO_CONTENT)
 }
