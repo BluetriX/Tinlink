@@ -10,8 +10,10 @@ server can withhold keys or add fake members (visible in the member list),
 but cannot forge keys of existing users.
 
 This document is the contract between the web and the desktop client. Both
-must produce and accept exactly these bytes; test vectors live next to each
-implementation and must match.
+must produce and accept exactly these bytes: `crates/e2ee` (Rust, used by
+the desktop client) and `apps/web/e2ee.js` (WebCrypto only) are both tested
+against `crates/e2ee/tests/vectors.json`, which also holds a key wrapped by
+the web code that the Rust tests open.
 
 ## Encoding
 
